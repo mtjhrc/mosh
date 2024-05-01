@@ -37,6 +37,7 @@
 #include <set>
 
 #include "src/network/network.h"
+#include "src/network/udp_connection.h"
 
 int main()
 {
