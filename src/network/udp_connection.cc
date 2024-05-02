@@ -49,6 +49,7 @@ also delete it here.
 #include "src/crypto/byteorder.h"
 #include "src/crypto/crypto.h"
 #include "src/network/network.h"
+#include "src/network/connection.h"
 #include "src/util/dos_assert.h"
 #include "src/util/fatal_assert.h"
 
@@ -96,7 +97,7 @@ Message Packet::toMessage( void )
   return Message( Nonce( direction_seq ), timestamps + payload );
 }
 
-Packet Connection::new_packet( const std::string& s_payload )
+Packet UDPConnection::new_packet( const std::string& s_payload )
 {
   uint16_t outgoing_timestamp_reply = -1;
 
@@ -114,7 +115,7 @@ Packet Connection::new_packet( const std::string& s_payload )
   return p;
 }
 
-void Connection::add_socket( int family )
+void UDPConnection::add_socket( int family )
 {
   Socket& sock = socks.emplace_back( family, SOCK_DGRAM );
   int fd = sock.fd();
@@ -142,7 +143,7 @@ void Connection::add_socket( int family )
 #endif
 }
 
-void Connection::hop_port( void )
+void UDPConnection::hop_port( void )
 {
   assert( !server );
 
@@ -153,7 +154,7 @@ void Connection::hop_port( void )
   prune_sockets();
 }
 
-void Connection::prune_sockets( void )
+void UDPConnection::prune_sockets( void )
 {
   /* don't keep old sockets if the new socket has been working for long enough */
   if ( socks.size() > 1 ) {
@@ -176,12 +177,12 @@ void Connection::prune_sockets( void )
   }
 }
 
-void Connection::setup( void )
+void UDPConnection::setup( void )
 {
   last_port_choice = timestamp();
 }
 
-const std::vector<int> Connection::fds( void ) const
+const std::vector<int> UDPConnection::fds( void ) const
 {
   std::vector<int> ret;
 
@@ -192,7 +193,7 @@ const std::vector<int> Connection::fds( void ) const
   return ret;
 }
 
-void Connection::set_MTU( int family )
+void UDPConnection::set_MTU( int family )
 {
   switch ( family ) {
     case AF_INET:
@@ -226,7 +227,7 @@ private:
   AddrInfo& operator=( const AddrInfo& );
 };
 
-Connection::Connection( const char* desired_ip, const char* desired_port ) /* server */
+UDPConnection::UDPConnection( const char* desired_ip, const char* desired_port ) /* server */
   : socks(), has_remote_addr( false ), remote_addr(), remote_addr_len( 0 ), server( true ), MTU( DEFAULT_SEND_MTU ),
     key(), session( key ), direction( TO_CLIENT ), saved_timestamp( -1 ), saved_timestamp_received_at( 0 ),
     expected_receiver_seq( 0 ), last_heard( -1 ), last_port_choice( -1 ), last_roundtrip_success( -1 ),
@@ -244,7 +245,7 @@ Connection::Connection( const char* desired_ip, const char* desired_port ) /* se
   int desired_port_low = -1;
   int desired_port_high = -1;
 
-  if ( desired_port && !parse_portrange( desired_port, desired_port_low, desired_port_high ) ) {
+  if ( desired_port && !Connection::parse_portrange( desired_port, desired_port_low, desired_port_high ) ) {
     throw NetworkException( "Invalid port range", 0 );
   }
 
@@ -272,7 +273,7 @@ Connection::Connection( const char* desired_ip, const char* desired_port ) /* se
   throw NetworkException( "Could not bind", errno );
 }
 
-bool Connection::try_bind( const char* addr, int port_low, int port_high )
+bool UDPConnection::try_bind( const char* addr, int port_low, int port_high )
 {
   struct addrinfo hints;
   memset( &hints, 0, sizeof( hints ) );
@@ -337,7 +338,7 @@ bool Connection::try_bind( const char* addr, int port_low, int port_high )
   throw NetworkException( "bind", saved_errno );
 }
 
-Connection::Connection( const char* key_str, const char* ip, const char* port ) /* client */
+UDPConnection::UDPConnection( const char* key_str, const char* ip, const char* port ) /* client */
   : socks(), has_remote_addr( false ), remote_addr(), remote_addr_len( 0 ), server( false ),
     MTU( DEFAULT_SEND_MTU ), key( key_str ), session( key ), direction( TO_SERVER ), saved_timestamp( -1 ),
     saved_timestamp_received_at( 0 ), expected_receiver_seq( 0 ), last_heard( -1 ), last_port_choice( -1 ),
@@ -363,7 +364,7 @@ Connection::Connection( const char* key_str, const char* ip, const char* port ) 
   set_MTU( remote_addr.sa.sa_family );
 }
 
-void Connection::send( const std::string& s )
+void UDPConnection::send( const std::string& s )
 {
   if ( !has_remote_addr ) {
     return;
@@ -398,7 +399,7 @@ void Connection::send( const std::string& s )
   }
 }
 
-std::string Connection::recv( void )
+std::string UDPConnection::recv( void )
 {
   assert( !socks.empty() );
   for ( std::deque<Socket>::const_iterator it = socks.begin(); it != socks.end(); it++ ) {
@@ -420,7 +421,7 @@ std::string Connection::recv( void )
   throw NetworkException( "No packet received" );
 }
 
-std::string Connection::recv_one( int sock_to_recv )
+std::string UDPConnection::recv_one( int sock_to_recv )
 {
   /* receive source address, ECN, and payload in msghdr structure */
   Addr packet_remote_addr;
@@ -543,7 +544,7 @@ std::string Connection::recv_one( int sock_to_recv )
   return p.payload;
 }
 
-std::string Connection::port( void ) const
+std::string UDPConnection::port( void ) const
 {
   Addr local_addr;
   socklen_t addrlen = sizeof( local_addr );
@@ -561,7 +562,7 @@ std::string Connection::port( void ) const
   return std::string( serv );
 }
 
-uint64_t Connection::timeout( void ) const
+uint64_t UDPConnection::timeout( void ) const
 {
   uint64_t RTO = lrint( ceil( SRTT + 4 * RTTVAR ) );
   if ( RTO < MIN_RTO ) {
@@ -570,55 +571,4 @@ uint64_t Connection::timeout( void ) const
     RTO = MAX_RTO;
   }
   return RTO;
-}
-
-bool Connection::parse_portrange( const char* desired_port, int& desired_port_low, int& desired_port_high )
-{
-  /* parse "port" or "portlow:porthigh" */
-  desired_port_low = desired_port_high = 0;
-  char* end;
-  long value;
-
-  /* parse first (only?) port */
-  errno = 0;
-  value = strtol( desired_port, &end, 10 );
-  if ( ( errno != 0 ) || ( *end != '\0' && *end != ':' ) ) {
-    fprintf( stderr, "Invalid (low) port number (%s)\n", desired_port );
-    return false;
-  }
-  if ( ( value < 0 ) || ( value > 65535 ) ) {
-    fprintf( stderr, "(Low) port number %ld outside valid range [0..65535]\n", value );
-    return false;
-  }
-
-  desired_port_low = (int)value;
-  if ( *end == '\0' ) { /* not a port range */
-    desired_port_high = desired_port_low;
-    return true;
-  }
-  /* port range; parse high port */
-  const char* cp = end + 1;
-  errno = 0;
-  value = strtol( cp, &end, 10 );
-  if ( ( errno != 0 ) || ( *end != '\0' ) ) {
-    fprintf( stderr, "Invalid high port number (%s)\n", cp );
-    return false;
-  }
-  if ( ( value < 0 ) || ( value > 65535 ) ) {
-    fprintf( stderr, "High port number %ld outside valid range [0..65535]\n", value );
-    return false;
-  }
-
-  desired_port_high = (int)value;
-  if ( desired_port_low > desired_port_high ) {
-    fprintf( stderr, "Low port %d greater than high port %d\n", desired_port_low, desired_port_high );
-    return false;
-  }
-
-  if ( desired_port_low == 0 ) {
-    fprintf( stderr, "Low port 0 incompatible with port ranges\n" );
-    return false;
-  }
-
-  return true;
 }

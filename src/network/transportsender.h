@@ -37,6 +37,7 @@
 #include <string>
 
 #include "src/crypto/prng.h"
+#include "src/network/connection.h"
 #include "src/network/network.h"
 #include "src/network/udp_connection.h"
 #include "src/protobufs/transportinstruction.pb.h"

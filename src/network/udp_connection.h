@@ -45,6 +45,7 @@ also delete it here.
 #include <sys/socket.h>
 
 #include "network.h"
+#include "src/crypto/crypto.h"
 
 namespace Network {
 
@@ -66,7 +67,7 @@ public:
   Message toMessage( void );
 };
 
-class Connection
+class UDPConnection
 {
 private:
   /*
@@ -164,8 +165,8 @@ public:
   /* Network transport overhead. */
   static const int ADDED_BYTES = 8 /* seqno/nonce */ + 4 /* timestamps */;
 
-  Connection( const char* desired_ip, const char* desired_port );      /* server */
-  Connection( const char* key_str, const char* ip, const char* port ); /* client */
+  UDPConnection( const char* desired_ip, const char* desired_port );      /* server */
+  UDPConnection( const char* key_str, const char* ip, const char* port ); /* client */
 
   void send( const std::string& s );
   std::string recv( void );
@@ -185,8 +186,6 @@ public:
   std::string& get_send_error( void ) { return send_error; }
 
   void set_last_roundtrip_success( uint64_t s_success ) { last_roundtrip_success = s_success; }
-
-  static bool parse_portrange( const char* desired_port_range, int& desired_port_low, int& desired_port_high );
 };
 }
 

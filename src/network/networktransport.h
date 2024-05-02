@@ -39,6 +39,7 @@
 #include <string>
 #include <vector>
 
+#include "src/network/connection.h"
 #include "src/network/network.h"
 #include "src/network/transportsender.h"
 #include "transportfragment.h"

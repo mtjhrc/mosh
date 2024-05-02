@@ -320,7 +320,7 @@ void TransportSender<MyState>::send_in_fragments( const std::string& diff, uint6
   }
 
   std::vector<Fragment> fragments = fragmenter.make_fragments(
-    inst, connection->get_MTU() - Network::Connection::ADDED_BYTES - Crypto::Session::ADDED_BYTES );
+    inst, connection->get_MTU() - Network::UDPConnection::ADDED_BYTES - Crypto::Session::ADDED_BYTES );
   for ( std::vector<Fragment>::iterator i = fragments.begin(); i != fragments.end(); i++ ) {
     connection->send( i->tostring() );
 
