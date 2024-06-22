@@ -43,8 +43,10 @@ template<class MyState, class RemoteState>
 Transport<MyState, RemoteState>::Transport( MyState& initial_state,
                                             RemoteState& initial_remote,
                                             const char* desired_ip,
-                                            const char* desired_port )
-  : connection( desired_ip, desired_port ), sender( &connection, initial_state ),
+                                            const char* desired_udp_port,
+                                            const char* desired_tcp_port,
+                                            NetworkTransportMode mode)
+  : connection( desired_ip, desired_udp_port, desired_tcp_port, mode ), sender( &connection, initial_state ),
     received_states( 1, TimestampedState<RemoteState>( timestamp(), 0, initial_remote ) ),
     receiver_quench_timer( 0 ), last_receiver_state( initial_remote ), verbose( 0 )
 {
@@ -56,8 +58,10 @@ Transport<MyState, RemoteState>::Transport( MyState& initial_state,
                                             RemoteState& initial_remote,
                                             const char* key_str,
                                             const char* ip,
-                                            const char* port )
-  : connection( key_str, ip, port ), sender( &connection, initial_state ),
+                                            const char* udp_port,
+                                            const char* tcp_port,
+                                            NetworkTransportMode mode)
+  : connection( key_str, ip, udp_port, tcp_port, mode ), sender( &connection, initial_state ),
     received_states( 1, TimestampedState<RemoteState>( timestamp(), 0, initial_remote ) ),
     receiver_quench_timer( 0 ), last_receiver_state( initial_remote ), verbose( 0 )
 {

@@ -254,6 +254,7 @@ void TransportSender<MyState>::send_to_receiver( const std::string& diff )
 template<class MyState>
 void TransportSender<MyState>::update_assumed_receiver_state( void )
 {
+
   uint64_t now = timestamp();
 
   /* start from what is known and give benefit of the doubt to unacknowledged states

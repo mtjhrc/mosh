@@ -197,7 +197,7 @@ void STMClient::init( void )
     overlays.get_notification_engine().set_escape_key_string( tmp );
   }
   wchar_t tmp[128];
-  swprintf( tmp, 128, L"Nothing received from server on UDP port %s.", port.c_str() );
+  swprintf( tmp, 128, L"Nothing received from server on UDP udp_port %s.", udp_port.c_str() );
   connecting_notification = std::wstring( tmp );
 }
 
@@ -220,12 +220,12 @@ void STMClient::shutdown( void )
   if ( still_connecting() ) {
     fprintf( stderr,
              "\nmosh did not make a successful connection to %s:%s.\n"
-             "Please verify that UDP port %s is not firewalled and can reach the server.\n\n"
-             "(By default, mosh uses a UDP port between 60000 and 61000. The -p option\n"
-             "selects a specific UDP port number.)\n",
+             "Please verify that UDP udp_port %s is not firewalled and can reach the server.\n\n"
+             "(By default, mosh uses a UDP udp_port between 60000 and 61000. The -p option\n"
+             "selects a specific UDP udp_port number.)\n",
              ip.c_str(),
-             port.c_str(),
-             port.c_str() );
+             udp_port.c_str(),
+             udp_port.c_str() );
   } else if ( network && !clean_shutdown ) {
     fputs( "\n\nmosh did not shut down cleanly. Please note that the\n"
            "mosh-server process may still be running on the server.\n",
@@ -260,7 +260,7 @@ void STMClient::main_init( void )
   /* open network */
   Network::UserStream blank;
   Terminal::Complete local_terminal( window_size.ws_col, window_size.ws_row );
-  network = NetworkPointer( new NetworkType( blank, local_terminal, key.c_str(), ip.c_str(), port.c_str() ) );
+  network = NetworkPointer( new NetworkType( blank, local_terminal, key.c_str(), ip.c_str(), udp_port.c_str(), tcp_port.c_str(),transport_mode ) );
 
   network->set_send_delay( 1 ); /* minimal delay on outgoing keystrokes */
 

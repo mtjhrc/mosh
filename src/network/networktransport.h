@@ -68,12 +68,17 @@ public:
   Transport( MyState& initial_state,
              RemoteState& initial_remote,
              const char* desired_ip,
-             const char* desired_port );
+             const char* desired_udp_port,
+             const char* desired_tcp_port,
+             NetworkTransportMode mode );
+
   Transport( MyState& initial_state,
              RemoteState& initial_remote,
              const char* key_str,
              const char* ip,
-             const char* port );
+             const char* udp_port,
+             const char* tcp_port,
+             NetworkTransportMode mode );
 
   /* Send data or an ack if necessary. */
   void tick( void ) { sender.tick(); }
@@ -98,7 +103,8 @@ public:
   /* Other side has requested shutdown and we have sent one ACK */
   bool counterparty_shutdown_ack_sent( void ) const { return sender.get_counterparty_shutdown_acknowledged(); }
 
-  std::string port( void ) const { return connection.port(); }
+  std::string udp_port( void ) const { return connection.udp_port(); }
+  std::string tcp_port( void ) const { return connection.tcp_port(); }
   std::string get_key( void ) const { return connection.get_key(); }
 
   MyState& get_current_state( void ) { return sender.get_current_state(); }

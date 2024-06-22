@@ -37,8 +37,10 @@
 #include <cerrno>
 #include <csignal>
 #include <cstring>
+#include <optional>
 
 #include <sys/select.h>
+#include <vector>
 
 #include "src/util/fatal_assert.h"
 #include "src/util/timestamp.h"
@@ -193,6 +195,19 @@ public:
     return FD_ISSET( fd, &read_fds );
   }
 
+  std::optional<int> read_any_of( const std::vector<int>& fds )
+#if FD_ISSET_IS_CONST
+    const
+#endif
+  {
+    for ( int fd : fds ) {
+      if ( read( fd ) ) {
+        return fd;
+      }
+    }
+    return std::nullopt;
+  }
+
   /* This method consumes a signal notification. */
   bool signal( int signum )
   {
@@ -214,10 +229,7 @@ public:
     return rv;
   }
 
-  static void set_verbose( unsigned int s_verbose )
-  {
-    verbose = s_verbose;
-  }
+  static void set_verbose( unsigned int s_verbose ) { verbose = s_verbose; }
 
 private:
   static const int MAX_SIGNAL_NUMBER = 64;

@@ -86,6 +86,10 @@ union Addr {
   struct sockaddr_storage ss;
 };
 
+enum class Fd : int
+{
+};
+
 class Socket
 {
 private:
@@ -94,10 +98,19 @@ private:
 public:
   int fd( void ) const { return _fd; }
   Socket( int family, int type );
+  explicit Socket( Fd fd );
   ~Socket();
 
   Socket( const Socket& other );
   Socket& operator=( const Socket& other );
+
+  static Socket from_fd( int fd );
+};
+
+enum class NetworkTransportMode
+{
+  UDP_ONLY,
+  TCP_ONLY
 };
 
 }

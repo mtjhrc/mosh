@@ -67,7 +67,15 @@ uint16_t Network::timestamp_diff( uint16_t tsnew, uint16_t tsold )
   return diff;
 }
 
-Socket::Socket( int family, int type ) : _fd( socket( family, type, 0 ) )
+Socket::Socket( Fd fd )
+  : _fd(static_cast<int>(fd))
+{
+  if ( _fd < 0 ) {
+    throw NetworkException( "Constructing Socket from invalid fd");
+  }
+}
+
+Socket::Socket( int family, int type ) : Socket( Fd(socket( family, type, 0 )) )
 {
   if ( _fd < 0 ) {
     throw NetworkException( "socket", errno );

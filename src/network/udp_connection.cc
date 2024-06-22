@@ -236,17 +236,17 @@ UDPConnection::UDPConnection( const char* desired_ip, const char* desired_port )
   setup();
 
   /* The mosh wrapper always gives an IP request, in order
-     to deal with multihomed servers. The port is optional. */
+     to deal with multihomed servers. The udp_port is optional. */
 
   /* If an IP request is given, we try to bind to that IP, but we also
-     try INADDR_ANY. If a port request is given, we bind only to that port. */
+     try INADDR_ANY. If a port request is given, we bind only to that udp_port. */
 
-  /* convert port numbers */
+  /* convert udp_port numbers */
   int desired_port_low = -1;
   int desired_port_high = -1;
 
   if ( desired_port && !Connection::parse_portrange( desired_port, desired_port_low, desired_port_high ) ) {
-    throw NetworkException( "Invalid port range", 0 );
+    throw NetworkException( "Invalid udp_port range", 0 );
   }
 
   /* try to bind to desired IP first */
@@ -288,10 +288,10 @@ bool UDPConnection::try_bind( const char* addr, int port_low, int port_high )
 
   int search_low = PORT_RANGE_LOW, search_high = PORT_RANGE_HIGH;
 
-  if ( port_low != -1 ) { /* low port preference */
+  if ( port_low != -1 ) { /* low udp_port preference */
     search_low = port_low;
   }
-  if ( port_high != -1 ) { /* high port preference */
+  if ( port_high != -1 ) { /* high udp_port preference */
     search_high = port_high;
   }
 
@@ -346,7 +346,7 @@ UDPConnection::UDPConnection( const char* key_str, const char* ip, const char* p
 {
   setup();
 
-  /* associate socket with remote host and port */
+  /* associate socket with remote host and udp_port */
   struct addrinfo hints;
   memset( &hints, 0, sizeof( hints ) );
   hints.ai_family = AF_UNSPEC;
@@ -556,7 +556,7 @@ std::string UDPConnection::port( void ) const
   char serv[NI_MAXSERV];
   int errcode = getnameinfo( &local_addr.sa, addrlen, NULL, 0, serv, sizeof( serv ), NI_DGRAM | NI_NUMERICSERV );
   if ( errcode != 0 ) {
-    throw NetworkException( std::string( "port: getnameinfo: " ) + gai_strerror( errcode ), 0 );
+    throw NetworkException( std::string( "udp_port: getnameinfo: " ) + gai_strerror( errcode ), 0 );
   }
 
   return std::string( serv );
