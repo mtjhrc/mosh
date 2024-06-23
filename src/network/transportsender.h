@@ -65,7 +65,7 @@ private:
   void rationalize_states( void );
   void send_to_receiver( const std::string& diff );
   void send_empty_ack( void );
-  void send_in_fragments( const std::string& diff, uint64_t new_num );
+  void send_diff( const std::string& diff, uint64_t new_num );
   void add_sent_state( uint64_t the_timestamp, uint64_t num, MyState& state );
 
   /* state of sender */
@@ -80,9 +80,6 @@ private:
 
   /* somewhere in the middle: the assumed state of the receiver */
   typename sent_states_type::iterator assumed_receiver_state;
-
-  /* for fragment creation */
-  Fragmenter fragmenter;
 
   /* timing state */
   uint64_t next_ack_time;
@@ -157,7 +154,7 @@ public:
 
   bool get_shutdown_in_progress( void ) const { return shutdown_in_progress; }
   bool get_shutdown_acknowledged( void ) const { return sent_states.front().num == uint64_t( -1 ); }
-  bool get_counterparty_shutdown_acknowledged( void ) const { return fragmenter.last_ack_sent() == uint64_t( -1 ); }
+  bool get_counterparty_shutdown_acknowledged( void ) const { return connection->get_last_ack_sent() == uint64_t( -1 ); }
   uint64_t get_sent_state_acked_timestamp( void ) const { return sent_states.front().timestamp; }
   uint64_t get_sent_state_acked( void ) const { return sent_states.front().num; }
   uint64_t get_sent_state_last( void ) const { return sent_states.back().num; }

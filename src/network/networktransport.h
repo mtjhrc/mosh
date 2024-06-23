@@ -62,7 +62,6 @@ private:
   std::list<TimestampedState<RemoteState>> received_states;
   uint64_t receiver_quench_timer;
   RemoteState last_receiver_state; /* the state we were in when user last queried state */
-  FragmentAssembly fragments;
   unsigned int verbose;
 
 public:

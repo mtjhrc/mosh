@@ -61,24 +61,57 @@ Connection::Connection( const char* desired_ip, const char* desired_port )
   : udp_connection( desired_ip, desired_port )
 {}
 
-void Connection::send( const std::string& s )
+void Connection::udp_send_in_fragments( const Instruction& inst, bool verbose, int send_interval )
 {
-  udp_connection.send( s );
+  std::vector<Fragment> fragments = fragmenter.make_fragments(
+    inst, udp_connection.get_MTU() - Network::UDPConnection::ADDED_BYTES - Crypto::Session::ADDED_BYTES );
+  for ( auto& fragment : fragments ) {
+    udp_connection.send( fragment.tostring() );
+
+    if ( verbose ) {
+      fprintf(
+        stderr,
+        "[%u] Sent [%d=>%d] id %d, frag %d ack=%d, throwaway=%d, len=%d, frame rate=%.2f, timeout=%d, srtt=%.1f\n",
+        (unsigned int)( timestamp() % 100000 ),
+        (int)inst.old_num(),
+        (int)inst.new_num(),
+        (int)fragment.id,
+        (int)fragment.fragment_num,
+        (int)inst.ack_num(),
+        (int)inst.throwaway_num(),
+        (int)fragment.contents.size(),
+        1000.0 / send_interval,
+        (int)udp_connection.timeout(),
+        udp_connection.get_SRTT() );
+    }
+  }
 }
 
-std::string Connection::recv( void )
+void Connection::send_instruction( const Instruction& inst, bool verbose, int send_interval )
 {
-  return udp_connection.recv();
+  last_ack_sent = inst.ack_num();
+  udp_send_in_fragments( inst, verbose, send_interval );
+}
+
+std::optional<Instruction> Connection::udp_recv_from_fragments( void )
+{
+  std::string s( udp_connection.recv() );
+  Fragment frag( s );
+
+  if ( fragments.add_fragment( frag ) ) { /* complete packet */
+    return fragments.get_assembly();
+  }
+  return std::nullopt;
+}
+
+std::optional<Instruction> Connection::recv_instruction( void )
+{
+  return udp_recv_from_fragments();
 }
 
 const std::vector<int> Connection::fds( void ) const
 {
   return udp_connection.fds();
-}
-
-int Connection::get_MTU( void ) const
-{
-  return udp_connection.get_MTU();
 }
 
 std::string Connection::port( void ) const
