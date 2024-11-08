@@ -44,8 +44,10 @@ also delete it here.
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include "connection.h"
 #include "network.h"
 #include "src/crypto/crypto.h"
+#include "transportfragment.h"
 
 namespace Network {
 
@@ -67,7 +69,7 @@ public:
   Message toMessage( void );
 };
 
-class UDPConnection
+class UDPConnection final : public Connection
 {
 private:
   /*
@@ -115,9 +117,8 @@ private:
 
   bool try_bind( const char* addr, int port_low, int port_high );
   std::deque<Socket> socks;
-  bool has_remote_addr;
+  bool has_remote_addr_;
   Addr remote_addr;
-  socklen_t remote_addr_len;
 
   bool server;
 
@@ -144,6 +145,11 @@ private:
   /* Error from send()/sendto(). */
   std::string send_error;
 
+  Fragmenter fragmenter;
+  FragmentAssembly fragments;
+
+  ReportFunction report_fn;
+
   Packet new_packet( const std::string& s_payload );
 
   void add_socket( int family );
@@ -161,31 +167,46 @@ private:
 
   void set_MTU( int family );
 
+  void send_fragment( const std::string& inst );
+  std::string recv_fragment( void );
+
 public:
   /* Network transport overhead. */
   static const int ADDED_BYTES = 8 /* seqno/nonce */ + 4 /* timestamps */;
 
-  UDPConnection( const char* desired_ip, const char* desired_port );      /* server */
-  UDPConnection( const char* key_str, const char* ip, const char* port ); /* client */
+  // Server
+  UDPConnection( Base64Key key, const char* desired_ip, PortRange desired_port );
 
-  void send( const std::string& s );
-  std::string recv( void );
-  const std::vector<int> fds( void ) const;
-  int get_MTU( void ) const { return MTU; }
+  // Client
+  UDPConnection( Base64Key key, const char* ip, Port port);
 
-  std::string port( void ) const;
-  std::string get_key( void ) const { return key.printable_key(); }
-  bool get_has_remote_addr( void ) const { return has_remote_addr; }
+  void set_report_function(Connection::ReportFunction report_fn) override {
+      this->report_fn = std::move(report_fn);
+  };
 
-  uint64_t timeout( void ) const;
-  double get_SRTT( void ) const { return SRTT; }
+  void send( const TransportBuffers::Instruction& inst ) override;
+  bool finish_send( void ) override {};
+  std::string clear_send_error( void ) override;
 
-  const Addr& get_remote_addr( void ) const { return remote_addr; }
-  socklen_t get_remote_addr_len( void ) const { return remote_addr_len; }
+  std::optional<TransportBuffers::Instruction> recv( void ) override;
 
-  std::string& get_send_error( void ) { return send_error; }
+  std::vector<int> fds_notify_read( void ) const override;
+  std::vector<int> fds_notify_write( void ) const override {
+    return {};
+  };
 
-  void set_last_roundtrip_success( uint64_t s_success ) { last_roundtrip_success = s_success; }
+  std::optional<Port> udp_port( void ) const override;
+  std::optional<Port> tcp_port( void ) const override {
+    return std::nullopt;
+  }
+
+  uint64_t timeout( void ) const override;
+  double get_SRTT( void ) const override { return SRTT; }
+
+  const Addr* get_remote_addr( void ) const override { return has_remote_addr_? &remote_addr : nullptr; }
+  bool has_remote_addr( void ) const override { return has_remote_addr_; }
+
+  void set_last_roundtrip_success( uint64_t timestamp ) override { last_roundtrip_success = timestamp; }
 };
 }
 

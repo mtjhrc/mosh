@@ -44,6 +44,7 @@
 
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <stdexcept>
 
 #include "src/crypto/crypto.h"
 
@@ -73,17 +74,61 @@ public:
   ~NetworkException() throw() {}
 };
 
+struct Port
+{
+  inline explicit Port( uint16_t p ) : p( p != 0 ? p : throw std::invalid_argument( "Invalid port number: 0" ) ) {}
+  uint16_t value() const {return p; }
+  operator uint16_t() const { return p; }
+private:
+  uint16_t p;
+};
+
+struct PortRange
+{
+  Port low;
+  Port high;
+};
+
 enum Direction
 {
   TO_SERVER = 0,
   TO_CLIENT = 1
 };
 
-union Addr {
-  struct sockaddr sa;
-  struct sockaddr_in sin;
-  struct sockaddr_in6 sin6;
-  struct sockaddr_storage ss;
+struct Addr {
+  union {
+    struct sockaddr sa;
+    struct sockaddr_in sin;
+    struct sockaddr_in6 sin6;
+    struct sockaddr_storage ss;
+  } addr;
+  socklen_t len;
+
+  Addr() :
+    len(sizeof addr)
+  {
+    std::memset(&addr, 0, sizeof addr);
+  }
+
+  static Addr getsockname(int fd) {
+    Addr addr;
+    if ( ::getsockname( fd, &addr.addr.sa, &addr.len ) < 0 ) {
+      throw NetworkException( "getsockname", errno );
+    }
+    return addr;
+  }
+
+  Port port() {
+    switch ( addr.sa.sa_family) {
+      case AF_INET:
+        return Port(ntohs(addr.sin.sin_port));
+      case AF_INET6:
+        return Port(ntohs(addr.sin6.sin6_port));
+      default:
+        throw std::invalid_argument("Unknown port family");
+    }
+  }
+
 };
 
 enum class Fd : int
@@ -110,7 +155,8 @@ public:
 enum class NetworkTransportMode
 {
   UDP_ONLY,
-  TCP_ONLY
+  TCP_ONLY,
+  PREFER_UDP,
 };
 
 }

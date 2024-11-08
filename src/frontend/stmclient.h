@@ -43,14 +43,15 @@
 #include "src/network/networktransport.h"
 #include "src/statesync/completeterminal.h"
 #include "src/statesync/user.h"
+#include "src/network/network.h"
 
 class STMClient
 {
 private:
   std::string ip;
-  std::string udp_port;
-  std::string tcp_port;
-  std::string key;
+  std::optional<Network::Port> udp_port;
+  std::optional<Network::Port> tcp_port;
+  Base64Key key;
   Network::NetworkTransportMode transport_mode;
 
   int escape_key;
@@ -92,14 +93,14 @@ private:
 
 public:
   STMClient( const char* s_ip,
-             const char* s_udp_port,
-             const char* s_tcp_port,
-             const char* s_key,
+             std::optional<Network::Port> udp_port,
+             std::optional<Network::Port> tcp_port,
+             Base64Key key,
              const char* predict_mode,
              Network::NetworkTransportMode transport_mode,
              unsigned int s_verbose,
              const char* predict_overwrite )
-    : ip( s_ip ? s_ip : "" ), udp_port( s_udp_port ? s_udp_port : "" ), tcp_port( s_tcp_port ? s_tcp_port : "" ),key( s_key ? s_key : "" ),
+    : ip( s_ip ? s_ip : "" ), udp_port( udp_port), tcp_port( tcp_port ),key( key ),
       transport_mode( transport_mode ), escape_key( 0x1E ), escape_pass_key( '^' ), escape_pass_key2( '^' ),
       escape_requires_lf( false ), escape_key_help( L"?" ), saved_termios(), raw_termios(), window_size(),
       local_framebuffer( 1, 1 ), new_state( 1, 1 ), overlays(), network(),

@@ -34,19 +34,60 @@
 #define NETWORK_TRANSPORT_IMPL_HPP
 
 #include "src/network/networktransport.h"
+#include "src/network/combinedconnection.h"
 
 #include "transportsender-impl.h"
 
 using namespace Network;
 
+static std::unique_ptr<Connection> make_server_connection( Base64Key key,
+                                                           const char* desired_ip,
+                                                           std::optional<PortRange> desired_udp_port,
+                                                           std::optional<PortRange> desired_tcp_port,
+                                                           NetworkTransportMode mode )
+{
+  switch ( mode ) {
+    case NetworkTransportMode::UDP_ONLY:
+      return std::make_unique<UDPConnection>( key, desired_ip, desired_udp_port.value() );
+    case NetworkTransportMode::TCP_ONLY:
+      return std::make_unique<TCPConnection>( key, desired_ip, desired_tcp_port.value() );
+    case NetworkTransportMode::PREFER_UDP:
+      return std::make_unique<CombinedConnection>(
+        key, desired_ip, desired_udp_port.value(), desired_tcp_port.value() );
+    default:
+      throw std::invalid_argument( "make_server_connection:  invalid connection mode" );
+  }
+}
+
+static std::unique_ptr<Connection> make_client_connection( Base64Key key,
+                                                           const char* addr,
+                                                           std::optional<Port> udp_port,
+                                                           std::optional<Port> tcp_port,
+                                                           NetworkTransportMode mode )
+{
+  switch ( mode ) {
+    case NetworkTransportMode::UDP_ONLY:
+      return std::make_unique<UDPConnection>( key, addr, udp_port.value() );
+    case NetworkTransportMode::TCP_ONLY:
+      return std::make_unique<TCPConnection>( key, addr, tcp_port.value() );
+    case NetworkTransportMode::PREFER_UDP:
+      return std::make_unique<CombinedConnection>(
+        key, addr, udp_port.value(), tcp_port.value() );
+    default:
+      throw std::invalid_argument( "make_client_connection:  invalid connection mode" );
+  }
+}
+
 template<class MyState, class RemoteState>
 Transport<MyState, RemoteState>::Transport( MyState& initial_state,
                                             RemoteState& initial_remote,
+                                            Base64Key key,
                                             const char* desired_ip,
-                                            const char* desired_udp_port,
-                                            const char* desired_tcp_port,
-                                            NetworkTransportMode mode)
-  : connection( desired_ip, desired_udp_port, desired_tcp_port, mode ), sender( &connection, initial_state ),
+                                            std::optional<PortRange> desired_udp_port,
+                                            std::optional<PortRange> desired_tcp_port,
+                                            NetworkTransportMode mode )
+  : connection( make_server_connection( key, desired_ip, desired_udp_port, desired_tcp_port, mode ) ),
+    sender( connection.get(), initial_state ),
     received_states( 1, TimestampedState<RemoteState>( timestamp(), 0, initial_remote ) ),
     receiver_quench_timer( 0 ), last_receiver_state( initial_remote ), verbose( 0 )
 {
@@ -56,12 +97,13 @@ Transport<MyState, RemoteState>::Transport( MyState& initial_state,
 template<class MyState, class RemoteState>
 Transport<MyState, RemoteState>::Transport( MyState& initial_state,
                                             RemoteState& initial_remote,
-                                            const char* key_str,
-                                            const char* ip,
-                                            const char* udp_port,
-                                            const char* tcp_port,
-                                            NetworkTransportMode mode)
-  : connection( key_str, ip, udp_port, tcp_port, mode ), sender( &connection, initial_state ),
+                                            Base64Key key,
+                                            const char* addr,
+                                            std::optional<Port> udp_port,
+                                            std::optional<Port> tcp_port,
+                                            NetworkTransportMode mode )
+  : connection( make_client_connection( key, addr, udp_port, tcp_port, mode ) ),
+    sender( connection.get(), initial_state ),
     received_states( 1, TimestampedState<RemoteState>( timestamp(), 0, initial_remote ) ),
     receiver_quench_timer( 0 ), last_receiver_state( initial_remote ), verbose( 0 )
 {
@@ -71,7 +113,7 @@ Transport<MyState, RemoteState>::Transport( MyState& initial_state,
 template<class MyState, class RemoteState>
 void Transport<MyState, RemoteState>::recv( void )
 {
-  auto inst = connection.recv_instruction();
+  auto inst = connection->recv();
   if ( !inst.has_value() ) {
     return;
   }
@@ -83,7 +125,7 @@ void Transport<MyState, RemoteState>::recv( void )
   sender.process_acknowledgment_through( inst->ack_num() );
 
   /* inform network layer of roundtrip (end-to-end-to-end) connectivity */
-  connection.set_last_roundtrip_success( sender.get_sent_state_acked_timestamp() );
+  connection->set_last_roundtrip_success( sender.get_sent_state_acked_timestamp() );
 
   /* first, make sure we don't already have the new state */
   for ( typename std::list<TimestampedState<RemoteState>>::iterator i = received_states.begin();
@@ -159,14 +201,6 @@ void Transport<MyState, RemoteState>::recv( void )
       }
       return;
     }
-  }
-  if ( verbose ) {
-    fprintf( stderr,
-             "[%u] Received state %d [coming from %d, ack %d]\n",
-             (unsigned int)( timestamp() % 100000 ),
-             (int)new_state.num,
-             (int)inst->old_num(),
-             (int)inst->ack_num() );
   }
   received_states.push_back( new_state );
   sender.set_ack_num( received_states.back().num );

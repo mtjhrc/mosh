@@ -48,8 +48,8 @@ also delete it here.
 
 #include "src/crypto/byteorder.h"
 #include "src/crypto/crypto.h"
+#include "src/network/combinedconnection.h"
 #include "src/network/network.h"
-#include "src/network/connection.h"
 #include "src/util/dos_assert.h"
 #include "src/util/fatal_assert.h"
 
@@ -148,8 +148,8 @@ void UDPConnection::hop_port( void )
   assert( !server );
 
   setup();
-  assert( remote_addr_len != 0 );
-  add_socket( remote_addr.sa.sa_family );
+  assert( has_remote_addr() );
+  add_socket( remote_addr.addr.sa.sa_family );
 
   prune_sockets();
 }
@@ -182,7 +182,7 @@ void UDPConnection::setup( void )
   last_port_choice = timestamp();
 }
 
-const std::vector<int> UDPConnection::fds( void ) const
+std::vector<int> UDPConnection::fds_notify_read( void ) const
 {
   std::vector<int> ret;
 
@@ -227,11 +227,11 @@ private:
   AddrInfo& operator=( const AddrInfo& );
 };
 
-UDPConnection::UDPConnection( const char* desired_ip, const char* desired_port ) /* server */
-  : socks(), has_remote_addr( false ), remote_addr(), remote_addr_len( 0 ), server( true ), MTU( DEFAULT_SEND_MTU ),
-    key(), session( key ), direction( TO_CLIENT ), saved_timestamp( -1 ), saved_timestamp_received_at( 0 ),
-    expected_receiver_seq( 0 ), last_heard( -1 ), last_port_choice( -1 ), last_roundtrip_success( -1 ),
-    RTT_hit( false ), SRTT( 1000 ), RTTVAR( 500 ), send_error()
+UDPConnection::UDPConnection( Base64Key key, const char* desired_ip, PortRange desired_port ) /* Server */
+  : socks(), has_remote_addr_( false ), remote_addr(), server( true ), MTU( DEFAULT_SEND_MTU ), session( key ),
+    direction( TO_CLIENT ), saved_timestamp( -1 ), saved_timestamp_received_at( 0 ), expected_receiver_seq( 0 ),
+    last_heard( -1 ), last_port_choice( -1 ), last_roundtrip_success( -1 ), RTT_hit( false ), SRTT( 1000 ),
+    RTTVAR( 500 ), send_error()
 {
   setup();
 
@@ -241,18 +241,10 @@ UDPConnection::UDPConnection( const char* desired_ip, const char* desired_port )
   /* If an IP request is given, we try to bind to that IP, but we also
      try INADDR_ANY. If a port request is given, we bind only to that udp_port. */
 
-  /* convert udp_port numbers */
-  int desired_port_low = -1;
-  int desired_port_high = -1;
-
-  if ( desired_port && !Connection::parse_portrange( desired_port, desired_port_low, desired_port_high ) ) {
-    throw NetworkException( "Invalid udp_port range", 0 );
-  }
-
   /* try to bind to desired IP first */
   if ( desired_ip ) {
     try {
-      if ( try_bind( desired_ip, desired_port_low, desired_port_high ) ) {
+      if ( try_bind( desired_ip, desired_port.low, desired_port.high ) ) {
         return;
       }
     } catch ( const NetworkException& e ) {
@@ -262,7 +254,7 @@ UDPConnection::UDPConnection( const char* desired_ip, const char* desired_port )
 
   /* now try any local interface */
   try {
-    if ( try_bind( NULL, desired_port_low, desired_port_high ) ) {
+    if ( try_bind( NULL, desired_port.low, desired_port.high ) ) {
       return;
     }
   } catch ( const NetworkException& e ) {
@@ -284,7 +276,7 @@ bool UDPConnection::try_bind( const char* addr, int port_low, int port_high )
 
   Addr local_addr;
   socklen_t local_addr_len = ai.res->ai_addrlen;
-  memcpy( &local_addr.sa, ai.res->ai_addr, local_addr_len );
+  memcpy( &local_addr.addr.sa, ai.res->ai_addr, local_addr_len );
 
   int search_low = PORT_RANGE_LOW, search_high = PORT_RANGE_HIGH;
 
@@ -295,36 +287,36 @@ bool UDPConnection::try_bind( const char* addr, int port_low, int port_high )
     search_high = port_high;
   }
 
-  add_socket( local_addr.sa.sa_family );
+  add_socket( local_addr.addr.sa.sa_family );
   for ( int i = search_low; i <= search_high; i++ ) {
-    switch ( local_addr.sa.sa_family ) {
+    switch ( local_addr.addr.sa.sa_family ) {
       case AF_INET:
-        local_addr.sin.sin_port = htons( i );
+        local_addr.addr.sin.sin_port = htons( i );
         break;
       case AF_INET6:
-        local_addr.sin6.sin6_port = htons( i );
+        local_addr.addr.sin6.sin6_port = htons( i );
         break;
       default:
         throw NetworkException( "Unknown address family", 0 );
     }
 
-    if ( local_addr.sa.sa_family == AF_INET6
-         && memcmp( &local_addr.sin6.sin6_addr, &in6addr_any, sizeof( in6addr_any ) ) == 0 ) {
+    if ( local_addr.addr.sa.sa_family == AF_INET6
+         && memcmp( &local_addr.addr.sin6.sin6_addr, &in6addr_any, sizeof( in6addr_any ) ) == 0 ) {
       const int off = 0;
       if ( setsockopt( sock(), IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof( off ) ) ) {
         perror( "setsockopt( IPV6_V6ONLY, off )" );
       }
     }
 
-    if ( ::bind( sock(), &local_addr.sa, local_addr_len ) == 0 ) {
-      set_MTU( local_addr.sa.sa_family );
+    if ( ::bind( sock(), &local_addr.addr.sa, local_addr_len ) == 0 ) {
+      set_MTU( local_addr.addr.sa.sa_family );
       return true;
     } // else fallthrough to below code, on last iteration.
   }
   int saved_errno = errno;
   socks.pop_back();
   char host[NI_MAXHOST], serv[NI_MAXSERV];
-  int errcode = getnameinfo( &local_addr.sa,
+  int errcode = getnameinfo( &local_addr.addr.sa,
                              local_addr_len,
                              host,
                              sizeof( host ),
@@ -338,11 +330,11 @@ bool UDPConnection::try_bind( const char* addr, int port_low, int port_high )
   throw NetworkException( "bind", saved_errno );
 }
 
-UDPConnection::UDPConnection( const char* key_str, const char* ip, const char* port ) /* client */
-  : socks(), has_remote_addr( false ), remote_addr(), remote_addr_len( 0 ), server( false ),
-    MTU( DEFAULT_SEND_MTU ), key( key_str ), session( key ), direction( TO_SERVER ), saved_timestamp( -1 ),
-    saved_timestamp_received_at( 0 ), expected_receiver_seq( 0 ), last_heard( -1 ), last_port_choice( -1 ),
-    last_roundtrip_success( -1 ), RTT_hit( false ), SRTT( 1000 ), RTTVAR( 500 ), send_error()
+UDPConnection::UDPConnection( Base64Key key, const char* ip, Port port ) /* client */
+  : socks(), has_remote_addr_( false ), remote_addr(), server( false ), MTU( DEFAULT_SEND_MTU ), session( key ),
+    direction( TO_SERVER ), saved_timestamp( -1 ), saved_timestamp_received_at( 0 ), expected_receiver_seq( 0 ),
+    last_heard( -1 ), last_port_choice( -1 ), last_roundtrip_success( -1 ), RTT_hit( false ), SRTT( 1000 ),
+    RTTVAR( 500 ), send_error()
 {
   setup();
 
@@ -352,29 +344,26 @@ UDPConnection::UDPConnection( const char* key_str, const char* ip, const char* p
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_DGRAM;
   hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV;
-  AddrInfo ai( ip, port, &hints );
-  fatal_assert( static_cast<size_t>( ai.res->ai_addrlen ) <= sizeof( remote_addr ) );
-  remote_addr_len = ai.res->ai_addrlen;
-  memcpy( &remote_addr.sa, ai.res->ai_addr, remote_addr_len );
+  std::string port_str = std::to_string( port );
+  AddrInfo ai( ip, port_str.c_str(), &hints );
+  fatal_assert( static_cast<size_t>( ai.res->ai_addrlen ) <= sizeof( remote_addr.addr ) );
+  remote_addr.len = ai.res->ai_addrlen;
+  memcpy( &remote_addr.addr.sa, ai.res->ai_addr, remote_addr.len );
 
-  has_remote_addr = true;
+  has_remote_addr_ = true;
 
-  add_socket( remote_addr.sa.sa_family );
+  add_socket( remote_addr.addr.sa.sa_family );
 
-  set_MTU( remote_addr.sa.sa_family );
+  set_MTU( remote_addr.addr.sa.sa_family );
 }
 
-void UDPConnection::send( const std::string& s )
+void UDPConnection::send_fragment( const std::string& s )
 {
-  if ( !has_remote_addr ) {
-    return;
-  }
-
   Packet px = new_packet( s );
 
   std::string p = session.encrypt( px.toMessage() );
 
-  ssize_t bytes_sent = sendto( sock(), p.data(), p.size(), MSG_DONTWAIT, &remote_addr.sa, remote_addr_len );
+  ssize_t bytes_sent = sendto( sock(), p.data(), p.size(), MSG_DONTWAIT, &remote_addr.addr.sa, remote_addr.len );
 
   if ( bytes_sent != static_cast<ssize_t>( p.size() ) ) {
     /* Make sendto() failure available to the frontend. */
@@ -389,7 +378,7 @@ void UDPConnection::send( const std::string& s )
   uint64_t now = timestamp();
   if ( server ) {
     if ( now - last_heard > SERVER_ASSOCIATION_TIMEOUT ) {
-      has_remote_addr = false;
+      has_remote_addr_ = false;
       fprintf( stderr, "Server now detached from client.\n" );
     }
   } else { /* client */
@@ -399,7 +388,34 @@ void UDPConnection::send( const std::string& s )
   }
 }
 
-std::string UDPConnection::recv( void )
+void UDPConnection::send( const Instruction& inst )
+{
+  if ( !has_remote_addr_ ) {
+    return;
+  }
+
+  std::vector<Fragment> fragments
+    = fragmenter.make_fragments( inst, MTU - Network::UDPConnection::ADDED_BYTES - Crypto::Session::ADDED_BYTES );
+  for ( auto& fragment : fragments ) {
+    send_fragment( fragment.tostring() );
+
+    if ( report_fn ) {
+      report_fn( UdpSendReport {
+        .inst = inst,
+        .fragment = fragment,
+        .timeout = timeout(),
+        .srtt = get_SRTT(),
+      } );
+    }
+  }
+}
+
+std::string UDPConnection::clear_send_error( void )
+{
+  return std::exchange( send_error, "" );
+}
+
+std::string UDPConnection::recv_fragment( void )
 {
   assert( !socks.empty() );
   for ( std::deque<Socket>::const_iterator it = socks.begin(); it != socks.end(); it++ ) {
@@ -418,7 +434,26 @@ std::string UDPConnection::recv( void )
     prune_sockets();
     return payload;
   }
-  throw NetworkException( "No packet received" );
+  return "";
+};
+
+std::optional<Instruction> UDPConnection::recv( void )
+{
+  std::string s( recv_fragment() );
+  if ( s.empty() ) {
+    return std::nullopt;
+  }
+  Fragment frag( s );
+
+  if ( fragments.add_fragment( frag ) ) { /* complete packet */
+    Instruction inst = fragments.get_assembly();
+    if ( report_fn ) {
+      report_fn( UdpRecvReport {
+        .inst = inst,
+      } );
+    }
+  }
+  return std::nullopt;
 }
 
 std::string UDPConnection::recv_one( int sock_to_recv )
@@ -520,17 +555,17 @@ std::string UDPConnection::recv_one( int sock_to_recv )
   }
 
   /* auto-adjust to remote host */
-  has_remote_addr = true;
+  has_remote_addr_ = true;
   last_heard = timestamp();
 
   if ( server && /* only client can roam */
-       ( remote_addr_len != header.msg_namelen
-         || memcmp( &remote_addr, &packet_remote_addr, remote_addr_len ) != 0 ) ) {
+       ( remote_addr.len != header.msg_namelen
+         || memcmp( &remote_addr.addr, &packet_remote_addr, remote_addr.len ) != 0 ) ) {
     remote_addr = packet_remote_addr;
-    remote_addr_len = header.msg_namelen;
+    remote_addr.len = header.msg_namelen;
     char host[NI_MAXHOST], serv[NI_MAXSERV];
-    int errcode = getnameinfo( &remote_addr.sa,
-                               remote_addr_len,
+    int errcode = getnameinfo( &remote_addr.addr.sa,
+                               remote_addr.len,
                                host,
                                sizeof( host ),
                                serv,
@@ -544,22 +579,10 @@ std::string UDPConnection::recv_one( int sock_to_recv )
   return p.payload;
 }
 
-std::string UDPConnection::port( void ) const
+std::optional<Port> UDPConnection::udp_port( void ) const
 {
-  Addr local_addr;
-  socklen_t addrlen = sizeof( local_addr );
-
-  if ( getsockname( sock(), &local_addr.sa, &addrlen ) < 0 ) {
-    throw NetworkException( "getsockname", errno );
-  }
-
-  char serv[NI_MAXSERV];
-  int errcode = getnameinfo( &local_addr.sa, addrlen, NULL, 0, serv, sizeof( serv ), NI_DGRAM | NI_NUMERICSERV );
-  if ( errcode != 0 ) {
-    throw NetworkException( std::string( "udp_port: getnameinfo: " ) + gai_strerror( errcode ), 0 );
-  }
-
-  return std::string( serv );
+  Addr local_addr = Addr::getsockname( sock() );
+  return local_addr.port();
 }
 
 uint64_t UDPConnection::timeout( void ) const

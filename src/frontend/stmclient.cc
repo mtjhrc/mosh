@@ -48,6 +48,7 @@
 
 #if HAVE_PTY_H
 #include <pty.h>
+#include <sstream>
 #elif HAVE_UTIL_H
 #include <util.h>
 #endif
@@ -197,7 +198,24 @@ void STMClient::init( void )
     overlays.get_notification_engine().set_escape_key_string( tmp );
   }
   wchar_t tmp[128];
-  swprintf( tmp, 128, L"Nothing received from server on UDP udp_port %s.", udp_port.c_str() );
+
+  if ( udp_port && tcp_port ) {
+    swprintf( tmp,
+              sizeof tmp / sizeof tmp[0],
+              L"Nothing received from server on UDP udp_port %d, TCP tcp_port %d.",
+              static_cast<int>( udp_port.value() ),
+              static_cast<int>( tcp_port.value() ) );
+  } else if ( udp_port ) {
+    swprintf( tmp,
+              sizeof tmp / sizeof tmp[0],
+              L"Nothing received from server on UDP udp_port %d.",
+              static_cast<int>( udp_port.value() ) );
+  } else if ( tcp_port ) {
+    swprintf( tmp,
+              sizeof tmp / sizeof tmp[0],
+              L"Nothing received from server on TCP tcp_port %d.",
+              static_cast<int>( tcp_port.value() ) );
+  }
   connecting_notification = std::wstring( tmp );
 }
 
@@ -218,14 +236,37 @@ void STMClient::shutdown( void )
   }
 
   if ( still_connecting() ) {
-    fprintf( stderr,
-             "\nmosh did not make a successful connection to %s:%s.\n"
-             "Please verify that UDP udp_port %s is not firewalled and can reach the server.\n\n"
-             "(By default, mosh uses a UDP udp_port between 60000 and 61000. The -p option\n"
-             "selects a specific UDP udp_port number.)\n",
-             ip.c_str(),
-             udp_port.c_str(),
-             udp_port.c_str() );
+    if ( udp_port && tcp_port ) {
+      fprintf( stderr,
+               "\nmosh did not make a successful UDP or TCP connection to %s.\n"
+               "Please verify that UDP udp_port %d and TCP tcp_port %d is not firewalled\n"
+               "and can reach the server.\n\n"
+               "(By default, mosh uses a UDP udp_port between 60000 and 61000. The -p option\n"
+               "selects a specific UDP udp_port number. When TCP is enabled, mosh by default\n"
+               "uses tcp_port between 60000 and 61000 The -t option selects a specific TCP\n"
+               "tcp_port number.)\n",
+               ip.c_str(),
+               static_cast<int>(udp_port->value()),
+               static_cast<int>(tcp_port->value()) );
+    } else if ( udp_port ) {
+      fprintf( stderr,
+               "\nmosh did not make a successful connection to %s:%d.\n"
+               "Please verify that UDP udp_port %d is not firewalled and can reach the server.\n\n"
+               "(By default, mosh uses a UDP udp_port between 60000 and 61000. The -p option\n"
+               "selects a specific UDP udp_port number.)\n",
+               ip.c_str(),
+               static_cast<int>( udp_port->value() ),
+               static_cast<int>( udp_port->value() ) );
+    } else if ( tcp_port ) {
+      fprintf( stderr,
+               "\nmosh did not make a successful TCP connection to %s:%d.\n"
+               "Please verify that TCP tcp_port %d is not firewalled and can reach the server.\n\n"
+               "(When TCP is enabled, mosh by default uses tcp_port between 60000 and 61000. \n"
+               "The -t option selects a specific TCP tcp_port number.)\n",
+               ip.c_str(),
+               static_cast<int>( udp_port->value() ),
+               static_cast<int>( udp_port->value() ) );
+    }
   } else if ( network && !clean_shutdown ) {
     fputs( "\n\nmosh did not shut down cleanly. Please note that the\n"
            "mosh-server process may still be running on the server.\n",
@@ -260,7 +301,8 @@ void STMClient::main_init( void )
   /* open network */
   Network::UserStream blank;
   Terminal::Complete local_terminal( window_size.ws_col, window_size.ws_row );
-  network = NetworkPointer( new NetworkType( blank, local_terminal, key.c_str(), ip.c_str(), udp_port.c_str(), tcp_port.c_str(),transport_mode ) );
+  network = NetworkPointer(
+    new NetworkType( blank, local_terminal, key, ip.c_str(), udp_port, tcp_port, transport_mode ) );
 
   network->set_send_delay( 1 ); /* minimal delay on outgoing keystrokes */
 
@@ -461,11 +503,17 @@ bool STMClient::main( void )
       /* poll for events */
       /* network->fd() can in theory change over time */
       sel.clear_fds();
-      std::vector<int> fd_list( network->fds() );
-      for ( std::vector<int>::const_iterator it = fd_list.begin(); it != fd_list.end(); it++ ) {
-        sel.add_fd( *it );
+      std::vector<int> read_fd_list( network->read_fds() );
+      std::vector<int> write_fd_list( network->write_fds() );
+      for ( std::vector<int>::const_iterator it = read_fd_list.begin(); it != read_fd_list.end(); it++ ) {
+        sel.add_read_fd( *it );
       }
-      sel.add_fd( STDIN_FILENO );
+      sel.add_read_fd( STDIN_FILENO );
+
+
+      for ( int fd : write_fd_list ) {
+        sel.add_write_fd( fd );
+      }
 
       int active_fds = sel.select( wait_time );
       if ( active_fds < 0 ) {
@@ -473,18 +521,12 @@ bool STMClient::main( void )
         break;
       }
 
-      bool network_ready_to_read = false;
-
-      for ( std::vector<int>::const_iterator it = fd_list.begin(); it != fd_list.end(); it++ ) {
-        if ( sel.read( *it ) ) {
-          /* packet received from the network */
-          /* we only read one socket each run */
-          network_ready_to_read = true;
-        }
+      if ( sel.read_any_of(read_fd_list) ) {
+        process_network_input();
       }
 
-      if ( network_ready_to_read ) {
-        process_network_input();
+      if ( sel.write_any_of( write_fd_list ) ) {
+        network->finish_send();
       }
 
       if ( sel.read( STDIN_FILENO )
@@ -552,10 +594,9 @@ bool STMClient::main( void )
 
       network->tick();
 
-      std::string& send_error = network->get_send_error();
+      std::string send_error = network->clear_send_error();
       if ( !send_error.empty() ) {
         overlays.get_notification_engine().set_network_error( send_error );
-        send_error.clear();
       } else {
         overlays.get_notification_engine().clear_network_error();
       }

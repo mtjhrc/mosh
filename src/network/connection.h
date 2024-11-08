@@ -1,66 +1,81 @@
-#ifndef MOSH_CONNECTION_H
-#define MOSH_CONNECTION_H
+#ifndef MOSH_CONNECTION_HPP
+#define MOSH_CONNECTION_HPP
 
-#include <optional>
-
+#include "src/network/network.h"
 #include "src/protobufs/transportinstruction.pb.h"
 #include "transportfragment.h"
-#include "network.h"
-#include "tcpconnection.h"
-#include "udp_connection.h"
+#include <functional>
+#include <optional>
+#include <string>
+#include <variant>
+#include <vector>
 
 namespace Network {
 
+struct TcpRecvReport
+{
+  const TransportBuffers::Instruction& inst;
+};
+
+struct UdpRecvReport
+{
+  const TransportBuffers::Instruction& inst;
+};
+
+struct TcpSendDroppedReport
+{
+  const TransportBuffers::Instruction& inst;
+  uint64_t timeout;
+  double srtt;
+};
+
+struct TcpSendReport
+{
+  const TransportBuffers::Instruction& inst;
+  uint32_t sent_len;
+  uint32_t msg_len;
+  uint64_t timeout;
+  double srtt;
+};
+
+struct UdpSendReport
+{
+  const TransportBuffers::Instruction& inst;
+  const Fragment& fragment;
+  uint64_t timeout;
+  double srtt;
+};
+
 class Connection
 {
-  std::optional<TCPConnection> tcp_connection;
-  std::optional<UDPConnection> udp_connection;
-  Fragmenter fragmenter;
-  FragmentAssembly fragments;
-  uint64_t last_ack_sent;
-
-  void udp_send_in_fragments( const Instruction& inst, bool verbose, int send_interval );
-  std::optional<Instruction> udp_recv_from_fragments( void );
-
-  void tcp_send( const Instruction& inst, bool verbose, int send_interval);
-  std::optional<Instruction> tcp_recv( void );
 public:
-  static bool parse_portrange( const char* desired_port_range, int& desired_port_low, int& desired_port_high );
+  using ReportFunction = std::function<void(
+    const std::variant<UdpRecvReport, TcpRecvReport, TcpSendReport, UdpSendReport, TcpSendDroppedReport>& )>;
 
-  Connection(const char* key_str, const char* ip, const char* udp_port, const char* tcp_port, NetworkTransportMode mode );
+  virtual ~Connection() {};
 
-  Connection(const char* desired_ip, const char* desired_udp_port,const char* desired_tcp_port, NetworkTransportMode mode);
+  virtual void set_report_function( ReportFunction report_fn ) = 0;
 
-  void send_instruction( const Instruction& inst, bool verbose, int send_interval );
-  std::optional<Instruction> recv_instruction( void );
-  const std::vector<int> fds( void ) const;
+  virtual void send( const TransportBuffers::Instruction& inst ) = 0;
+  virtual std::string clear_send_error( void ) = 0;
+  virtual bool finish_send( void ) = 0;
 
-  std::string udp_port( void ) const;
-  std::string tcp_port( void ) const;
+  virtual std::optional<TransportBuffers::Instruction> recv( void ) = 0;
 
-  std::string get_key( void ) const;
-  bool get_has_remote_addr( void ) const;
-  uint64_t get_last_ack_sent( void ) const { return last_ack_sent; }
+  virtual std::vector<int> fds_notify_read( void ) const = 0;
+  virtual std::vector<int> fds_notify_write( void ) const = 0;
 
-  uint64_t timeout( void ) const;
-  double get_SRTT( void ) const;
+  virtual std::optional<Port> udp_port( void ) const = 0;
+  virtual std::optional<Port> tcp_port( void ) const = 0;
 
-  const Addr& get_remote_addr( void ) const;
-  socklen_t get_remote_addr_len( void ) const;
+  virtual uint64_t timeout( void ) const = 0;
+  virtual double get_SRTT( void ) const = 0;
 
-  std::string& get_send_error( void );
+  virtual const Addr* get_remote_addr( void ) const = 0;
+  virtual bool has_remote_addr( void ) const { return get_remote_addr() != nullptr; };
 
-  void set_last_roundtrip_success( uint64_t s_success );
-
-  bool is_reliable()
-  {
-#ifdef MODE_TCP
-    return true;
-#else
-    return false;
-#endif
-  }
+  virtual void set_last_roundtrip_success( uint64_t timestamp ) = 0;
 };
 }
 
-#endif // MOSH_CONNECTION_H
+#endif // MOSH_CONNECTION_HPP

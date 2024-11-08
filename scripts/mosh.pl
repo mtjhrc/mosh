@@ -73,7 +73,9 @@ my $bind_ip = undef;
 my $use_remote_ip = 'proxy';
 
 my $family = 'prefer-inet';
-my $port_request = undef;
+my $udp_port_request = undef;
+my $tcp_port_request = undef;
+my $transport_mode = 'udp';
 
 my @ssh = ('ssh');
 
@@ -111,6 +113,13 @@ qq{Usage: $0 [options] [--] [user@]host [command...]
 -p PORT[:PORT2]
         --port=PORT[:PORT2]  server-side UDP port or range
                                 (No effect on server-side SSH port)
+-t PORT[:PORT2]
+        --tcp-port=PORT[:PORT2] server-side TCP port or range
+                                (No effect on server-side SSH port)
+        --transport=udp         use only UDP for network transport (default)
+        --transport=tcp         use only TCP for network transport
+        --transport=prefer-udp  use both TCP and UDP for transport, if UDP is not
+                                available automatically switch to TCP
         --bind-server={ssh|any|IP}  ask the server to reply from an IP address
                                        (default: "ssh")
 
@@ -156,13 +165,16 @@ GetOptions( 'client=s' => \$client,
 	    'server=s' => \$server,
 	    'predict=s' => \$predict,
 	    'predict-overwrite|o!' => \$overwrite,
-	    'port=s' => \$port_request,
+	    'port=s' => \$udp_port_request,
+	    'tcp_port=s' => \$tcp_port_request,
+	    'transport=s' => \$transport_mode,
 	    'a' => sub { $predict = 'always' },
 	    'n' => sub { $predict = 'never' },
 	    'family=s' => \$family,
 	    '4' => sub { $family = 'inet' },
 	    '6' => sub { $family = 'inet6' },
-	    'p=s' => \$port_request,
+	    'p=s' => \$udp_port_request,
+	    't=s' => \$tcp_port_request,
 	    'ssh=s' => sub { @ssh = shellwords($_[1]); },
 	    'ssh-pty!' => \$ssh_pty,
 	    'init!' => \$term_init,
@@ -210,29 +222,13 @@ if ( $overwrite ) {
     $ENV{ "MOSH_PREDICTION_OVERWRITE" } = "yes";
 }
 
-if ( defined $port_request ) {
-  if ( $port_request =~ m{^(\d+)(:(\d+))?$} ) {
-    my ( $low, $clause, $high ) = ( $1, $2, $3 );
-    # good port or port-range
-    if ( $low < 0 or $low > 65535 ) {
-      die "$0: Server-side (low) port ($low) must be within valid range [0..65535].\n";
-    }
-    if ( defined $high ) {
-      if ( $high <= 0 or $high > 65535 ) {
-	die "$0: Server-side high port ($high) must be within valid range [1..65535].\n";
-      }
-      if ( $low == 0 ) {
-	die "$0: Server-side port ranges may not be used with starting port 0 ($port_request).\n";
-      }
-      if ( $low > $high ) {
-	die "$0: Server-side port range ($port_request): low port greater than high port.\n";
-      }
-    }
-  } else {
-    die "$0: Server-side port or range ($port_request) is not valid.\n";
-  }
+if ( defined $udp_port_request ) {
+    validate_port_request($udp_port_request);
 }
 
+if ( defined $tcp_port_request ) {
+    validate_port_request($tcp_port_request);
+}
 delete $ENV{ 'MOSH_PREDICTION_DISPLAY' };
 
 my $userhost;
@@ -380,8 +376,16 @@ if ( $pid == 0 ) { # child
 
   push @server, @bind_arguments;
 
-  if ( defined $port_request ) {
-    push @server, ( '-p', $port_request );
+  if ( defined $udp_port_request ) {
+    push @server, ( '-p', $udp_port_request );
+  }
+
+  if ( defined $udp_port_request ) {
+    push @server, ( '-p', $udp_port_request );
+  }
+
+  if ( defined $transport_mode ) {
+    push @server, ( '-m', $transport_mode );
   }
 
   for ( &locale_vars ) {
@@ -410,7 +414,7 @@ if ( $pid == 0 ) { # child
   exec @exec_argv;
   die "Cannot exec ssh: $!\n";
 } else { # parent
-  my ( $sship, $port, $key );
+  my ( $sship, $udp_port, $tcp_port, $key );
   my $bad_udp_port_warning = 0;
   LINE: while ( <$pipe> ) {
     chomp;
@@ -427,13 +431,17 @@ if ( $pid == 0 ) { # child
 	die "Bad MOSH SSH_CONNECTION string: $_\n";
       }
     } elsif ( m{^MOSH CONNECT } ) {
-      if ( ( $port, $key ) = m{^MOSH CONNECT (\d+?) ([A-Za-z0-9/+]{22})\s*$} ) {
-	last LINE;
+      if ( ( $udp_port, $key ) = m{^MOSH CONNECT (\d+?) ([A-Za-z0-9/+]{22})\s*$} ) {
+        last LINE;
+      } elsif ( ( $tcp_port, $key ) = m{^MOSH CONNECT TCP (\d+?) ([A-Za-z0-9/+]{22})\s*$} ) {
+        last LINE;
+      } elsif ( ( $udp_port, $tcp_port, $key ) = m{^MOSH CONNECT (\d+?) TCP (\d+?) ([A-Za-z0-9/+]{22})\s*$} ) {
+        last LINE;
       } else {
 	die "Bad MOSH CONNECT string: $_\n";
       }
     } else {
-      if ( defined $port_request and $port_request =~ m{:} and m{Bad UDP port} ) {
+      if ( defined $udp_port_request and $udp_port_request =~ m{:} and m{Bad UDP port} ) {
 	$bad_udp_port_warning = 1;
       }
       print "$_\n";
@@ -451,7 +459,7 @@ if ( $pid == 0 ) { # child
     }
   }
 
-  if ( not defined $key or not defined $port ) {
+  if ( not defined $key or not defined $udp_port ) {
     if ( $bad_udp_port_warning ) {
       die "$0: Server does not support UDP port range option.\n";
     }
@@ -460,9 +468,10 @@ if ( $pid == 0 ) { # child
 
   # Now start real mosh client
   $ENV{ 'MOSH_KEY' } = $key;
+  $ENV{ 'MOSH_TRANSPORT_MODE' } = $transport_mode;
   $ENV{ 'MOSH_PREDICTION_DISPLAY' } = $predict;
   $ENV{ 'MOSH_NO_TERM_INIT' } = '1' if !$term_init;
-  exec {$client} ("$client", "-# @cmdline |", $ip, $port);
+  exec {$client} ("$client", "-# @cmdline |", $ip, $udp_port, $tcp_port);
 }
 
 sub shell_quote { join ' ', map {(my $a = $_) =~ s/'/'\\''/g; "'$a'"} @_ }
@@ -535,4 +544,28 @@ sub resolvename {
     }
   }
   return @res;
+}
+
+sub validate_port_request {
+  my ($port_request) = @_;
+  if ( $port_request =~ m{^(\d+)(:(\d+))?$} ) {
+    my ( $low, $clause, $high ) = ( $1, $2, $3 );
+    # good port or port-range
+    if ( $low < 0 or $low > 65535 ) {
+      die "$0: Server-side (low) port ($low) must be within valid range [0..65535].\n";
+    }
+    if ( defined $high ) {
+      if ( $high <= 0 or $high > 65535 ) {
+        die "$0: Server-side high port ($high) must be within valid range [1..65535].\n";
+      }
+      if ( $low == 0 ) {
+        die "$0: Server-side port ranges may not be used with starting port 0 ($port_request).\n";
+      }
+      if ( $low > $high ) {
+        die "$0: Server-side port range ($port_request): low port greater than high port.\n";
+      }
+    }
+  } else {
+    die "$0: Server-side port or range ($port_request) is not valid.\n";
+  }
 }

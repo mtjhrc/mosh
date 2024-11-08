@@ -33,6 +33,7 @@
 #include "src/include/config.h"
 #include "src/include/version.h"
 
+#include <climits>
 #include <cstdlib>
 
 #include <unistd.h>
@@ -105,13 +106,17 @@ static void print_colorcount( void )
   printf( "%d\n", color_val );
 }
 
-
-void verify_port_arg(const char* prog_name, const char *port_name, const char *port) {
-  if ( port && ( strspn( port, "0123456789" ) != strlen( port ) ) ) {
+Network::Port parse_port_number_or_exit( const char* prog_name, const char* port_name, const char* port )
+{
+  errno = 0;
+  char* end;
+  long value = strtol( port, &end, 10 );
+  if ( errno != 0 || *end != '\0' || value <= 1 || value > UINT16_MAX ) {
     fprintf( stderr, "%s: Bad %s udp_port (%s)\n\n", prog_name, port_name, port );
     print_usage( stderr, port_name );
     exit( 1 );
   }
+  return Network::Port( static_cast<uint16_t>( value ) );
 }
 
 #ifdef NACL
@@ -161,7 +166,9 @@ int main( int argc, char* argv[] )
 
   int num_args = argc - optind;
 
-  char *ip, *desired_udp_port, *desired_tcp_port = nullptr;
+  char* ip = nullptr;
+  std::optional<Network::Port> desired_udp_port;
+  std::optional<Network::Port> desired_tcp_port;
 
   if ( num_args < 2 || num_args > 3 ) {
     print_usage( stderr, argv[0] );
@@ -169,14 +176,10 @@ int main( int argc, char* argv[] )
   }
 
   ip = argv[optind];
-  desired_udp_port = argv[optind + 1];
-  if (num_args == 3) {
-    desired_tcp_port = argv[optind + 2];
+  desired_udp_port = parse_port_number_or_exit( argv[0], "UDP", argv[optind + 1] );
+  if ( num_args == 3 ) {
+    desired_tcp_port = parse_port_number_or_exit( argv[0], "TCP", argv[optind + 2] );
   }
-
-  /* Sanity-check arguments */
-  verify_port_arg(argv[0],"UDP",desired_udp_port);
-  verify_port_arg(argv[0],"TCP", desired_tcp_port);
 
   /* Read key from environment */
   char* env_key = getenv( "MOSH_KEY" );
@@ -202,6 +205,8 @@ int main( int argc, char* argv[] )
     transport_mode = Network::NetworkTransportMode::UDP_ONLY;
   } else if ( strcmp( transport_mode_str, "TCP" ) == 0 ) {
     transport_mode = Network::NetworkTransportMode::TCP_ONLY;
+  } else if ( strcmp( transport_mode_str, "PREFER_UDP" ) == 0 ) {
+    transport_mode = Network::NetworkTransportMode::PREFER_UDP;
   } else {
     fprintf( stderr, "Invalid network transport mode\n" );
     exit( 1 );
@@ -219,7 +224,8 @@ int main( int argc, char* argv[] )
 
   bool success = false;
   try {
-    STMClient client( ip, desired_udp_port, desired_tcp_port, key.c_str(), predict_mode, transport_mode, verbose, predict_overwrite );
+    STMClient client(
+      ip, desired_udp_port, desired_tcp_port, key, predict_mode, transport_mode, verbose, predict_overwrite );
     client.init();
 
     try {

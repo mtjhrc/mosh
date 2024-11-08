@@ -121,7 +121,7 @@ int TransportSender<MyState>::wait_time( void )
 
   uint64_t now = timestamp();
 
-  if ( !connection->get_has_remote_addr() ) {
+  if ( !connection->has_remote_addr() ) {
     return INT_MAX;
   }
 
@@ -138,7 +138,7 @@ void TransportSender<MyState>::tick( void )
 {
   calculate_timers(); /* updates assumed receiver state and rationalizes */
 
-  if ( !connection->get_has_remote_addr() ) {
+  if ( !connection->has_remote_addr() ) {
     return;
   }
 
@@ -319,7 +319,8 @@ void TransportSender<MyState>::send_diff( const std::string& diff, uint64_t new_
     shutdown_tries++;
   }
 
-  connection->send_instruction( inst, verbose, send_interval() );
+  last_ack_sent = inst.ack_num();
+  connection->send( inst );
 
   pending_data_ack = false;
 }

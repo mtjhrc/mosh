@@ -105,8 +105,8 @@ static void serve( int host_fd,
                    long network_signaled_timeout );
 
 static int run_server( const char* desired_ip,
-                       const char* desired_udp_port,
-                       const char* desired_tcp_port,
+                       std::optional<PortRange> desired_udp_port,
+                       std::optional<PortRange> desired_tcp_port,
                        Network::NetworkTransportMode transport_mode,
                        const std::string& command_path,
                        char* command_argv[],
@@ -127,7 +127,8 @@ static void print_version( FILE* file )
 static void print_usage( FILE* stream, const char* argv0 )
 {
   fprintf( stream,
-           "Usage: %s new [-s] [-v] [-i LOCALADDR] [-p UDP_PORT[:UDPPORT2]] [-t TCP_PORT[:TCPPORT2]] [-c COLORS] [-l NAME=VALUE] -m MODE [-- COMMAND...]\n",
+           "Usage: %s new [-s] [-v] [-i LOCALADDR] [-p UDP_PORT[:UDPPORT2]] [-t TCP_PORT[:TCPPORT2]] [-c COLORS] "
+           "[-l NAME=VALUE] -m MODE [-- COMMAND...]\n",
            argv0 );
 }
 
@@ -177,6 +178,60 @@ static std::string get_SSH_IP( void )
   return local_interface_IP;
 }
 
+std::optional<PortRange> parse_portrange( const char* desired_port )
+{
+  assert( desired_port != nullptr );
+
+  /* parse "port" or "portlow:porthigh" */
+  uint16_t desired_port_low = 0;
+  uint16_t desired_port_high = 0;
+  char* end;
+  long value;
+
+  /* parse first (only?) port */
+  errno = 0;
+  value = strtol( desired_port, &end, 10 );
+  if ( ( errno != 0 ) || ( *end != '\0' && *end != ':' ) ) {
+    fprintf( stderr, "Invalid (low) port number (%s)\n", desired_port );
+    return std::nullopt;
+  }
+  if ( ( value < 0 ) || ( value > 65535 ) ) {
+    fprintf( stderr, "(Low) port number %ld outside valid range [0..65535]\n", value );
+    return std::nullopt;
+  }
+
+  desired_port_low = (int)value;
+  if ( *end == '\0' ) { /* not a port range */
+    desired_port_high = desired_port_low;
+    return PortRange { .low = Port( desired_port_low ), .high = Port( desired_port_high ) };
+  }
+  /* port range; parse high port */
+  const char* cp = end + 1;
+  errno = 0;
+  value = strtol( cp, &end, 10 );
+  if ( ( errno != 0 ) || ( *end != '\0' ) ) {
+    fprintf( stderr, "Invalid high port number (%s)\n", cp );
+    return std::nullopt;
+  }
+  if ( ( value < 0 ) || ( value > 65535 ) ) {
+    fprintf( stderr, "High port number %ld outside valid range [0..65535]\n", value );
+    return std::nullopt;
+  }
+
+  desired_port_high = (int)value;
+  if ( desired_port_low > desired_port_high ) {
+    fprintf( stderr, "Low port %d greater than high port %d\n", desired_port_low, desired_port_high );
+    return std::nullopt;
+  }
+
+  if ( desired_port_low == 0 ) {
+    fprintf( stderr, "Low port 0 incompatible with port ranges\n" );
+    return std::nullopt;
+  }
+
+  return PortRange { .low = Port( desired_port_low ), .high = Port( desired_port_high ) };
+}
+
 int main( int argc, char* argv[] )
 {
   /* For security, make sure we don't dump core */
@@ -187,8 +242,8 @@ int main( int argc, char* argv[] )
 
   const char* desired_ip = NULL;
   std::string desired_ip_str;
-  const char* desired_udp_port = NULL;
-  const char* desired_tcp_port = nullptr;
+  std::optional<PortRange> desired_udp_port_range;
+  std::optional<PortRange> desired_tcp_port_range;
   std::string command_path;
   char** command_argv = NULL;
   int colors = 0;
@@ -235,10 +290,20 @@ int main( int argc, char* argv[] )
           desired_ip = optarg;
           break;
         case 'p':
-          desired_udp_port = optarg;
+          desired_udp_port_range = parse_portrange( optarg );
+          if ( !desired_udp_port_range ) {
+            fprintf( stderr, "%s: Bad UDP udp_port range (%s)\n", argv[0], optarg );
+            print_usage( stderr, argv[0] );
+            exit( 1 );
+          }
           break;
         case 't':
-          desired_tcp_port = optarg;
+          desired_tcp_port_range = parse_portrange( optarg );
+          if ( !desired_tcp_port_range ) {
+            fprintf( stderr, "%s: Bad TCP tcp_port range (%s)\n", argv[0], optarg );
+            print_usage( stderr, argv[0] );
+            exit( 1 );
+          }
           break;
         case 's':
           desired_ip = NULL;
@@ -262,6 +327,8 @@ int main( int argc, char* argv[] )
             transport_mode = Network::NetworkTransportMode::UDP_ONLY;
           } else if ( strcasecmp( optarg, "TCP" ) == 0 ) {
             transport_mode = Network::NetworkTransportMode::TCP_ONLY;
+          } else if ( strcasecmp( optarg, "PREFER_UDP" ) == 0 ) {
+            transport_mode = Network::NetworkTransportMode::PREFER_UDP;
           } else {
             fprintf( stderr, "Invalid network transport mode\n" );
             exit( 1 );
@@ -286,16 +353,13 @@ int main( int argc, char* argv[] )
     desired_ip = argv[1];
   } else if ( argc == 3 ) {
     desired_ip = argv[1];
-    desired_udp_port = argv[2];
+    desired_udp_port_range = parse_portrange( optarg );
+    if ( !desired_udp_port_range ) {
+      fprintf( stderr, "%s: Bad UDP udp_port range (%s)\n", argv[0], optarg );
+      print_usage( stderr, argv[0] );
+      exit( 1 );
+    }
   } else {
-    print_usage( stderr, argv[0] );
-    exit( 1 );
-  }
-
-  /* Sanity-check arguments */
-  int dpl, dph;
-  if ( desired_udp_port && !Connection::parse_portrange( desired_udp_port, dpl, dph ) ) {
-    fprintf( stderr, "%s: Bad UDP udp_port range (%s)\n", argv[0], desired_udp_port );
     print_usage( stderr, argv[0] );
     exit( 1 );
   }
@@ -388,7 +452,15 @@ int main( int argc, char* argv[] )
   }
 
   try {
-    return run_server( desired_ip, desired_udp_port, desired_tcp_port, transport_mode, command_path, command_argv, colors, verbose, with_motd );
+    return run_server( desired_ip,
+                       desired_udp_port_range,
+                       desired_tcp_port_range,
+                       transport_mode,
+                       command_path,
+                       command_argv,
+                       colors,
+                       verbose,
+                       with_motd );
   } catch ( const Network::NetworkException& e ) {
     fprintf( stderr, "Network exception: %s\n", e.what() );
     return 1;
@@ -399,8 +471,8 @@ int main( int argc, char* argv[] )
 }
 
 static int run_server( const char* desired_ip,
-                       const char* desired_udp_port,
-                       const char* desired_tcp_port,
+                       std::optional<PortRange> desired_udp_port,
+                       std::optional<PortRange> desired_tcp_port,
                        NetworkTransportMode mode,
                        const std::string& command_path,
                        char* command_argv[],
@@ -449,10 +521,14 @@ static int run_server( const char* desired_ip,
   /* open parser and terminal */
   Terminal::Complete terminal( window_size.ws_col, window_size.ws_row );
 
+  /* Generate encryption key */
+  Base64Key key;
+
   /* open network */
   Network::UserStream blank;
   using NetworkPointer = std::shared_ptr<ServerConnection>;
-  NetworkPointer network( new ServerConnection( terminal, blank, desired_ip, desired_udp_port, desired_tcp_port, mode ) );
+  NetworkPointer network(
+    new ServerConnection( terminal, blank, key, desired_ip, desired_udp_port, desired_tcp_port, mode ) );
 
   network->set_verbose( verbose );
   Select::set_verbose( verbose );
@@ -466,12 +542,14 @@ static int run_server( const char* desired_ip,
     puts( "\r\n" );
   }
 
-  if (mode == NetworkTransportMode::TCP_ONLY) {
-    printf( "MOSH CONNECT TCP %s %s\n", network->tcp_port().c_str(), network->get_key().c_str() );
-  }else {
-    printf( "MOSH CONNECT %s %s\n", network->udp_port().c_str(), network->get_key().c_str() );
+  printf( "MOSH CONNECT" );
+  if ( auto port = network->udp_port() ) {
+    printf( " %d", static_cast<int>( port.value() ) );
   }
-
+  if ( auto port = network->tcp_port() ) {
+    printf( " TCP %d", static_cast<int>( port.value() ) );
+  }
+  printf( " %s\n", key.printable_key().c_str() );
 
   /* don't let signals kill us */
   struct sigaction sa;
@@ -501,7 +579,6 @@ static int run_server( const char* desired_ip,
            "probably does not work properly on this platform.\n",
            stderr );
 #endif /* HAVE_IUTF8 */
-
     fflush( NULL );
     if ( isatty( STDOUT_FILENO ) ) {
       tcdrain( STDOUT_FILENO );
@@ -764,12 +841,17 @@ static void serve( int host_fd,
 
       /* poll for events */
       sel.clear_fds();
-      std::vector<int> network_fds( network.fds() );
-      for (int fd : network_fds ) {
-        sel.add_fd( fd );
+      std::vector<int> read_fds( network.read_fds() );
+      for ( int fd : read_fds ) {
+        sel.add_read_fd( fd );
       }
+      std::vector<int> write_fds( network.write_fds() );
+      for ( int fd : read_fds ) {
+        sel.add_write_fd( fd );
+      }
+
       if ( !network.shutdown_in_progress() ) {
-        sel.add_fd( host_fd );
+        sel.add_read_fd( host_fd );
       }
 
       int active_fds = sel.select( timeout );
@@ -782,7 +864,11 @@ static void serve( int host_fd,
       uint64_t time_since_remote_state = now - network.get_latest_remote_state().timestamp;
       std::string terminal_to_host;
 
-      if ( sel.read_any_of( network_fds ) ) {
+      if (sel.write_any_of( write_fds )) {
+        network.finish_send();
+      }
+
+      if ( sel.read_any_of( read_fds ) ) {
         /* packet received from the network */
         network.recv();
 

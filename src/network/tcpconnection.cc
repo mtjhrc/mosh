@@ -8,18 +8,22 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 
-#include "src/network/connection.h"
+#include "compressor.h"
+#include "src/network/combinedconnection.h"
 #include "src/util/dos_assert.h"
+#include "src/util/fatal_assert.h"
 
 using namespace Network;
 
 void TCPConnection::set_connection_established( bool connection_established )
 {
-  // If the connection is resetting, we need to reset the rcv buffer
   if ( this->connection_established && !connection_established ) {
+    // Drop any partial packet in rcv_buf
     rcv_current_packet_len = 0;
     rcv_index = 0;
     rcv_buf.clear();
+    // Close the connection on our side
+    sock = std::nullopt;
   }
   this->connection_established = connection_established;
 }
@@ -32,67 +36,40 @@ bool TCPConnection::establish_connection( void )
 
   if ( is_server() ) {
     assert( server_socket.has_value() );
-    int client_fd = ::accept( server_socket->fd(), (struct sockaddr*)&remote_addr.sin, &remote_addr_len );
+    int client_fd = ::accept( server_socket->fd(), (struct sockaddr*)&remote_addr.addr.sin, &remote_addr.len );
     if ( client_fd < 0 ) {
-      throw NetworkException( "establish_connection (accept)", errno );
+      if ( errno != EAGAIN ) {
+        send_error = std::string( "TCP accept: " ) + strerror( errno );
+      }
+      return false;
     }
     sock = Socket( Fd { client_fd } );
   } else {
-    assert( sock.has_value() );
-    if ( ::connect( sock->fd(), (struct sockaddr*)&remote_addr, remote_addr_len ) < 0 ) {
+    if ( !sock ) {
+      sock = Socket( AF_INET, SOCK_STREAM | SOCK_NONBLOCK );
+    }
+    if ( ::connect( sock->fd(), (struct sockaddr*)&remote_addr, remote_addr.len ) < 0 ) {
       set_connection_established( false );
       switch ( errno ) {
-        case EISCONN:
-          // close to current socket and try to reconnect again
-          sock = Socket( AF_INET, SOCK_STREAM );
+        case EINPROGRESS:
+        case EALREADY:
           return false;
+        case EISCONN:
+          break;
         default:
-          throw NetworkException( "establish_connection (connect)", errno );
+          send_error = std::string( "TCP connect: " ) + strerror( errno );
       }
     }
   }
 
-  uint64_t tcp_timeout = timeout();
-  if ( ::setsockopt( sock->fd(), IPPROTO_TCP, TCP_USER_TIMEOUT, &tcp_timeout, sizeof( tcp_timeout ) ) < 0 ) {
-    throw NetworkException( "setsockopt(..., IPPROTO_TCP, TCP_USER_TIMEOUT, ...)", errno );
-  }
-
-  connection_established = true;
+  set_connection_established( true );
   return true;
 }
 
-static uint16_t parse_port_number(const char* port_str ) {
-  if ( port_str == nullptr) {
-    throw NetworkException("Port number not specified", EINVAL);
-  }
-
-  char* endptr;
-  errno = 0;
-  long int value = std::strtol( port_str, &endptr, 10);
-
-  // Check for various possible errors
-  if (errno !=0 || value < 0 || value > UINT16_MAX || endptr== port_str || *endptr != '\0') {
-    throw NetworkException("Invalid port number", EINVAL);
-  }
-
-  return static_cast<uint16_t>(value);
-}
-
-TCPConnection::TCPConnection( const char* desired_ip, const char* desired_port ) /* server */
-  : server_socket( Socket( AF_INET, SOCK_STREAM ) ), sock( std::nullopt ), remote_addr(), remote_addr_len( 0 ),
-    key(), session( key ), direction( TO_CLIENT ), saved_timestamp( -1 ), saved_timestamp_received_at( 0 ),
-    expected_receiver_seq( 0 ), send_error()
-{ // server
-
-  /* convert udp_port numbers */
-  int desired_port_low = -1;
-  int desired_port_high = -1;
-
-  if ( desired_port == nullptr
-       || !Connection::parse_portrange( desired_port, desired_port_low, desired_port_high ) ) {
-    throw NetworkException( "Invalid udp_port range", 0 );
-  }
-
+TCPConnection::TCPConnection( Base64Key key, const char* desired_ip, PortRange desired_port_range ) /* server */
+  : server_socket( Socket( AF_INET, SOCK_STREAM | SOCK_NONBLOCK ) ), session( key ), direction( TO_CLIENT ),
+    saved_timestamp( -1 ), saved_timestamp_received_at( 0 )
+{
   sockaddr_in server_addr;
   memset( &server_addr, 0, sizeof server_addr );
   server_addr.sin_family = AF_INET;
@@ -101,7 +78,7 @@ TCPConnection::TCPConnection( const char* desired_ip, const char* desired_port )
   int bind_errno;
   bool bind_success = false;
 
-  for ( int port = desired_port_low; port <= desired_port_high; ++port ) {
+  for ( uint16_t port = desired_port_range.low; port <= desired_port_range.high; ++port ) {
     server_addr.sin_port = htons( port );
     if ( ::bind( server_socket->fd(), (struct sockaddr*)&server_addr, sizeof( server_addr ) ) >= 0 ) {
       bind_success = true;
@@ -112,33 +89,33 @@ TCPConnection::TCPConnection( const char* desired_ip, const char* desired_port )
   }
 
   if ( !bind_success ) {
-    throw NetworkException( "Failed to bind to any port in range", errno );
+    throw NetworkException( "Failed to bind to any port in range", bind_errno );
   }
 
-  if ( ::listen( server_socket->fd(), 1 ) < 0 ) {
-    throw NetworkException( "listen", bind_errno );
+  if ( ::listen( server_socket->fd(), 16 ) < 0 ) {
+    throw NetworkException( "listen", errno );
   }
 }
 
-TCPConnection::TCPConnection( const char* key_str, const char* ip, const char* port ) /* client */
-  : server_socket( std::nullopt ), sock( Socket( AF_INET, SOCK_STREAM ) ), remote_addr(), remote_addr_len( 0 ),
-    key( key_str ), session( key ), direction( TO_SERVER ), saved_timestamp( -1 ), saved_timestamp_received_at( 0 ),
+TCPConnection::TCPConnection( Base64Key key, const char* addr, Port port ) /* client */
+  : session( key ), direction( TO_SERVER ), saved_timestamp( -1 ), saved_timestamp_received_at( 0 ),
     expected_receiver_seq( 0 ), send_error()
 {
-  uint16_t parsed_port = parse_port_number(port);
+  remote_addr.addr.sin.sin_family = AF_INET;
+  remote_addr.addr.sin.sin_port = htons( port.value() );
+  remote_addr.addr.sin.sin_addr.s_addr = inet_addr( addr );
+  remote_addr.len = sizeof( sockaddr_in );
 
-  remote_addr.sin.sin_family = AF_INET;
-  remote_addr.sin.sin_port = htons( parsed_port );
-  remote_addr.sin.sin_addr.s_addr = inet_addr( ip );
-  remote_addr_len = sizeof( sockaddr_in );
+  establish_connection();
 }
 
-static std::string size_to_network_order_string( uint32_t host_order )
+static void prepend_msg_size( std::string& msg )
 {
+  auto host_order = msg.size();
+  assert( host_order <= UINT32_MAX );
   assert( host_order != 0 );
   uint32_t net_ord = htobe32( host_order );
-  assert( net_ord != 0 );
-  return std::string( (char*)&net_ord, sizeof( net_ord ) );
+  msg.insert( 0, reinterpret_cast<char*>( &net_ord ), 4 );
 }
 
 static uint32_t size_from_network_order( uint32_t net_order )
@@ -146,28 +123,93 @@ static uint32_t size_from_network_order( uint32_t net_order )
   return be32toh( net_order );
 }
 
-void TCPConnection::send( const std::string& s )
+std::optional<TCPConnection::packet_len_t> TCPConnection::send_bytes( const std::string& msg, packet_len_t index )
+{
+  assert( msg.size() >= index );
+  assert( msg.size() - index <= MAX_PACKET_LEN );
+  ssize_t result = ::send( sock->fd(), msg.data() + index, msg.size() - index, MSG_DONTWAIT | MSG_NOSIGNAL );
+  if ( result < 0 && errno == EAGAIN ) {
+    return std::nullopt;
+  } else if ( result < 0 && errno != EAGAIN ) {
+    set_connection_established( false );
+    send_error = std::string( "TCP send: " ) + strerror( errno );
+  }
+  return result;
+}
+
+bool TCPConnection::finish_send( void )
+{
+  if ( send_buffer.empty() ) {
+    return true;
+  }
+
+  auto sent = send_bytes( send_buffer, send_buffer_index );
+  if ( !sent ) {
+    return false;
+  }
+  send_buffer_index += sent.value();
+
+  if ( send_buffer_index >= send_buffer.size() ) {
+    send_buffer.clear();
+    send_buffer_index = 0;
+    return true;
+  }
+
+  return false;
+}
+
+void TCPConnection::send( const Instruction& inst )
 {
   if ( !establish_connection() ) {
+    send_dropped( inst );
+    return;
+  }
+  assert( sock );
+  if ( !finish_send() ) {
+    send_dropped( inst );
     return;
   }
 
-  Packet packet = new_packet( s );
-  std::string payload = session.encrypt( packet.toMessage() );
+  Packet packet = new_packet( get_compressor().compress_str( inst.SerializeAsString() ) );
+  std::string msg = session.encrypt( packet.toMessage() );
 
-  auto size_str = size_to_network_order_string( payload.size() );
+  prepend_msg_size( msg );
 
-  std::string msg = size_str + payload;
-  size_t total_sent = 0;
-
-  while ( total_sent < msg.size() ) {
-    ssize_t ret = ::send( sock->fd(), msg.data() + total_sent, msg.size() - total_sent, MSG_NOSIGNAL );
-    if ( ret < 0 && errno != EAGAIN ) {
-      set_connection_established( false );
-      throw NetworkException( "send", errno );
-    }
-    total_sent += ret;
+  std::optional<packet_len_t> sent_bytes = send_bytes( msg, 0 );
+  if ( !sent_bytes ) {
+    send_dropped( inst );
+  } else if ( sent_bytes.value() < msg.size() ) { // partial write
+    send_buffer = std::move( msg );
+    send_buffer_index = sent_bytes.value();
+    return;
   }
+
+  if ( report_fn ) {
+    report_fn( TcpSendReport {
+      .inst = inst,
+      .sent_len = sent_bytes.value(),
+      .msg_len = static_cast<uint32_t>( msg.size() ),
+      .timeout = timeout(),
+      .srtt = SRTT,
+    } );
+  }
+}
+
+void TCPConnection::send_dropped( const TransportBuffers::Instruction& inst )
+{
+  if ( report_fn ) {
+    report_fn( TcpSendDroppedReport {
+      .inst = inst,
+      .timeout = timeout(),
+      .srtt = SRTT,
+    } );
+  }
+  // TODO: adjust timers
+}
+
+std::string TCPConnection::clear_send_error( void )
+{
+  return std::exchange( send_error, "" );
 }
 
 bool TCPConnection::fill_rcv_buf( ssize_t size )
@@ -208,7 +250,7 @@ bool TCPConnection::fill_rcv_buf( ssize_t size )
   return false;
 }
 
-std::string TCPConnection::recv( void )
+std::optional<Instruction> TCPConnection::recv( void )
 {
   if ( !establish_connection() ) {
     return {};
@@ -223,7 +265,7 @@ std::string TCPConnection::recv( void )
   }
 
   if ( !fill_rcv_buf( rcv_current_packet_len ) ) {
-    return {};
+    return std::nullopt;
   }
   assert( rcv_buf.size() == rcv_current_packet_len );
   rcv_current_packet_len = 0;
@@ -263,25 +305,21 @@ std::string TCPConnection::recv( void )
     }
   }
 
-  return p.payload;
+  Instruction inst;
+  fatal_assert( inst.ParseFromString( get_compressor().uncompress_str( p.payload ) ) );
+
+  if ( report_fn ) {
+    report_fn( TcpRecvReport {
+      .inst = inst,
+    } );
+  }
+  return inst;
 }
 
-std::string TCPConnection::port( void ) const
+std::optional<Port> TCPConnection::tcp_port( void ) const
 {
-  Addr local_addr;
-  socklen_t addrlen = sizeof( local_addr );
-
-  if ( getsockname( is_server() ? server_socket->fd() : sock->fd(), &local_addr.sa, &addrlen ) < 0 ) {
-    throw NetworkException( "getsockname", errno );
-  }
-
-  char serv[NI_MAXSERV];
-  int errcode = getnameinfo( &local_addr.sa, addrlen, NULL, 0, serv, sizeof( serv ), NI_DGRAM | NI_NUMERICSERV );
-  if ( errcode != 0 ) {
-    throw NetworkException( std::string( "udp_port: getnameinfo: " ) + gai_strerror( errcode ), 0 );
-  }
-
-  return { serv };
+  Addr local_addr = Addr::getsockname( is_server() ? server_socket->fd() : sock->fd() );
+  return local_addr.port();
 }
 
 uint64_t TCPConnection::timeout( void ) const

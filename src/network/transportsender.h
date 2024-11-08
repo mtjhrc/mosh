@@ -37,7 +37,7 @@
 #include <string>
 
 #include "src/crypto/prng.h"
-#include "src/network/connection.h"
+#include "src/network/combinedconnection.h"
 #include "src/network/network.h"
 #include "src/network/udp_connection.h"
 #include "src/protobufs/transportinstruction.pb.h"
@@ -100,6 +100,8 @@ private:
 
   uint64_t last_heard; /* last time received new state */
 
+  uint64_t last_ack_sent;
+
   /* chaff to disguise instruction length */
   PRNG prng;
   const std::string make_chaff( void );
@@ -150,11 +152,11 @@ public:
     current_state = x;
     current_state.reset_input();
   }
-  void set_verbose( unsigned int s_verbose ) { verbose = s_verbose; }
+  void set_verbose( unsigned int s_verbose );
 
   bool get_shutdown_in_progress( void ) const { return shutdown_in_progress; }
   bool get_shutdown_acknowledged( void ) const { return sent_states.front().num == uint64_t( -1 ); }
-  bool get_counterparty_shutdown_acknowledged( void ) const { return connection->get_last_ack_sent() == uint64_t( -1 ); }
+  bool get_counterparty_shutdown_acknowledged( void ) const { return last_ack_sent == uint64_t( -1 ); }
   uint64_t get_sent_state_acked_timestamp( void ) const { return sent_states.front().timestamp; }
   uint64_t get_sent_state_acked( void ) const { return sent_states.front().num; }
   uint64_t get_sent_state_last( void ) const { return sent_states.back().num; }
@@ -169,6 +171,97 @@ public:
   TransportSender( const TransportSender& x );
   TransportSender& operator=( const TransportSender& x );
 };
+
+template<class MyState>
+struct ReportPrinter
+{
+  TransportSender<MyState>& sender;
+
+  void operator()( const UdpRecvReport& report )
+  {
+    const auto& [inst] = report;
+    fprintf( stderr,
+             "[%u] Received state %d [coming from %d, ack %d]\n",
+             (unsigned int)( timestamp() % 100000 ),
+             (int)inst.new_num(),
+             (int)inst.old_num(),
+             (int)inst.ack_num() );
+  }
+
+  void operator()( const TcpRecvReport& report )
+  {
+    const auto& [inst] = report;
+    fprintf( stderr,
+             "[%u] TCP Received state %d [coming from %d, ack %d]\n",
+             (unsigned int)( timestamp() % 100000 ),
+             (int)inst.new_num(),
+             (int)inst.old_num(),
+             (int)inst.ack_num() );
+  }
+
+  void operator()( const UdpSendReport& udp_report )
+  {
+    const auto& [inst, fragment, timeout, srtt] = udp_report;
+    fprintf( stderr,
+             "[%u] Sent [%d=>%d] id %d, frag %d ack=%d, throwaway=%d, len=%d, frame rate=%.2f, timeout=%d, "
+             "srtt=%.1f\n",
+             (unsigned int)( timestamp() % 100000 ),
+             (int)inst.old_num(),
+             (int)inst.new_num(),
+             (int)fragment.id,
+             (int)fragment.fragment_num,
+             (int)inst.ack_num(),
+             (int)inst.throwaway_num(),
+             (int)fragment.contents.size(),
+             1000.0 / sender.send_interval(),
+             (int)timeout,
+             srtt );
+  }
+
+  void operator()( const TcpSendReport& tcp_report )
+  {
+    const auto& [inst, sent_len, msg_len, timeout, srtt] = tcp_report;
+    fprintf( stderr,
+             "[%u] Sent [%d=>%d] TCP ack=%d, throwaway=%d, len=%u/%u, frame rate=%.2f, timeout=%d, srtt=%.1f\n",
+             (unsigned int)( timestamp() % 100000 ),
+             (int)inst.old_num(),
+             (int)inst.new_num(),
+             (int)inst.ack_num(),
+             (int)inst.throwaway_num(),
+             sent_len,
+             msg_len,
+             1000.0 / sender.send_interval(),
+             (int)timeout,
+             srtt );
+  }
+
+  void operator()( const TcpSendDroppedReport& tcp_report )
+  {
+    const auto& [inst, timeout, srtt] = tcp_report;
+    fprintf( stderr,
+             "[%u] Drop [%d=>%d] TCP ack=%d, throwaway=%d, frame rate=%.2f, timeout=%d, srtt=%.1f\n",
+             (unsigned int)( timestamp() % 100000 ),
+             (int)inst.old_num(),
+             (int)inst.new_num(),
+             (int)inst.ack_num(),
+             (int)inst.throwaway_num(),
+             1000.0 / sender.send_interval(),
+             (int)timeout,
+             srtt );
+  }
+};
+
+template<class MyState>
+void TransportSender<MyState>::set_verbose( unsigned int s_verbose )
+{
+  verbose = s_verbose;
+  if ( verbose ) {
+    connection->set_report_function(
+      [r = ReportPrinter<MyState> { .sender = *this }]( const auto& report ) mutable { std::visit( r, report ); } );
+  } else {
+    connection->set_report_function( {} );
+  }
+}
 }
 
 #endif
