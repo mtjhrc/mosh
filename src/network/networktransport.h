@@ -39,6 +39,7 @@
 #include <string>
 #include <vector>
 
+#include "src/network/combined_connection.h"
 #include "src/network/network.h"
 #include "src/network/transportsender.h"
 #include "transportfragment.h"
@@ -49,31 +50,36 @@ class Transport
 {
 private:
   /* the underlying, encrypted network connection */
-  Connection connection;
+  std::unique_ptr<Connection> connection;
 
   /* sender side */
   TransportSender<MyState> sender;
 
-  /* helper methods for recv() */
+  /* helper methods for recv_bytes() */
   void process_throwaway_until( uint64_t throwaway_num );
 
   /* simple receiver */
   std::list<TimestampedState<RemoteState>> received_states;
   uint64_t receiver_quench_timer;
   RemoteState last_receiver_state; /* the state we were in when user last queried state */
-  FragmentAssembly fragments;
   unsigned int verbose;
 
 public:
   Transport( MyState& initial_state,
              RemoteState& initial_remote,
+             Base64Key key,
              const char* desired_ip,
-             const char* desired_port );
+             std::optional<PortRange> desired_udp_port,
+             std::optional<PortRange> desired_tcp_port,
+             NetworkTransportMode mode );
+
   Transport( MyState& initial_state,
              RemoteState& initial_remote,
-             const char* key_str,
-             const char* ip,
-             const char* port );
+             Base64Key key,
+             const char* addr,
+             std::optional<Port> udp_port,
+             std::optional<Port> tcp_port,
+             NetworkTransportMode mode );
 
   /* Send data or an ack if necessary. */
   void tick( void ) { sender.tick(); }
@@ -93,13 +99,12 @@ public:
   bool shutdown_in_progress( void ) const { return sender.get_shutdown_in_progress(); }
   bool shutdown_acknowledged( void ) const { return sender.get_shutdown_acknowledged(); }
   bool shutdown_ack_timed_out( void ) const { return sender.shutdown_ack_timed_out(); }
-  bool has_remote_addr( void ) const { return connection.get_has_remote_addr(); }
 
   /* Other side has requested shutdown and we have sent one ACK */
   bool counterparty_shutdown_ack_sent( void ) const { return sender.get_counterparty_shutdown_acknowledged(); }
 
-  std::string port( void ) const { return connection.port(); }
-  std::string get_key( void ) const { return connection.get_key(); }
+  std::optional<Port> udp_port( void ) const { return connection->udp_port(); };
+  std::optional<Port> tcp_port( void ) const { return connection->tcp_port(); }
 
   MyState& get_current_state( void ) { return sender.get_current_state(); }
   void set_current_state( const MyState& x ) { sender.set_current_state( x ); }
@@ -108,7 +113,8 @@ public:
 
   const TimestampedState<RemoteState>& get_latest_remote_state( void ) const { return received_states.back(); }
 
-  const std::vector<int> fds( void ) const { return connection.fds(); }
+  void register_select( Select& select ) { connection->register_select( select ); }
+  Actions wakeup( Select& select ) { return connection->wakeup( select ); }
 
   void set_verbose( unsigned int s_verbose )
   {
@@ -124,10 +130,10 @@ public:
 
   unsigned int send_interval( void ) const { return sender.send_interval(); }
 
-  const Addr& get_remote_addr( void ) const { return connection.get_remote_addr(); }
-  socklen_t get_remote_addr_len( void ) const { return connection.get_remote_addr_len(); }
+  const Addr* get_remote_addr( void ) const { return connection->get_remote_addr(); }
+  bool has_remote_addr( void ) const { return connection->has_remote_addr(); }
 
-  std::string& get_send_error( void ) { return connection.get_send_error(); }
+  std::string clear_send_error( void ) { return connection->clear_send_error(); }
 };
 }
 

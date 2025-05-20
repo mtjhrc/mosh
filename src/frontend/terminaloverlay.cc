@@ -546,7 +546,7 @@ void PredictionEngine::cull( const Framebuffer& fb )
           break;
         case Pending:
           /* When a prediction takes a long time to be confirmed, we
-             activate the predictions even if SRTT is low */
+             activate the predictions even if srtt is low */
           if ( ( now - j->prediction_time ) >= GLITCH_FLAG_THRESHOLD ) {
             glitch_trigger = GLITCH_REPAIR_COUNT * 2; /* display and underline */
           } else if ( ( ( now - j->prediction_time ) >= GLITCH_THRESHOLD )

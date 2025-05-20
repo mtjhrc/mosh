@@ -50,10 +50,9 @@ template<class MyState>
 TransportSender<MyState>::TransportSender( Connection* s_connection, MyState& initial_state )
   : connection( s_connection ), current_state( initial_state ),
     sent_states( 1, TimestampedState<MyState>( timestamp(), 0, initial_state ) ),
-    assumed_receiver_state( sent_states.begin() ), fragmenter(), next_ack_time( timestamp() ),
-    next_send_time( timestamp() ), verbose( 0 ), shutdown_in_progress( false ), shutdown_tries( 0 ),
-    shutdown_start( -1 ), ack_num( 0 ), pending_data_ack( false ), SEND_MINDELAY( 8 ), last_heard( 0 ), prng(),
-    mindelay_clock( -1 )
+    assumed_receiver_state( sent_states.begin() ), next_ack_time( timestamp() ), next_send_time( timestamp() ),
+    verbose( 0 ), shutdown_in_progress( false ), shutdown_tries( 0 ), shutdown_start( -1 ), ack_num( 0 ),
+    pending_data_ack( false ), SEND_MINDELAY( 8 ), last_heard( 0 ), prng(), mindelay_clock( -1 )
 {}
 
 /* Try to send roughly two frames per RTT, bounded by limits on frame rate */
@@ -98,7 +97,7 @@ void TransportSender<MyState>::calculate_timers( void )
       next_send_time = std::max( next_send_time, mindelay_clock + SEND_MINDELAY );
     }
   } else if ( !( current_state == sent_states.front().state ) && ( last_heard + ACTIVE_RETRY_TIMEOUT > now ) ) {
-    next_send_time = sent_states.back().timestamp + connection->timeout() + ACK_DELAY;
+    next_send_time = sent_states.back().timestamp + connection->get_RTO() + ACK_DELAY;
   } else {
     next_send_time = uint64_t( -1 );
   }
@@ -122,7 +121,7 @@ int TransportSender<MyState>::wait_time( void )
 
   uint64_t now = timestamp();
 
-  if ( !connection->get_has_remote_addr() ) {
+  if ( !connection->has_remote_addr() ) {
     return INT_MAX;
   }
 
@@ -139,7 +138,7 @@ void TransportSender<MyState>::tick( void )
 {
   calculate_timers(); /* updates assumed receiver state and rationalizes */
 
-  if ( !connection->get_has_remote_addr() ) {
+  if ( !connection->has_remote_addr() ) {
     return;
   }
 
@@ -202,7 +201,7 @@ void TransportSender<MyState>::send_empty_ack( void )
 
   //  sent_states.push_back( TimestampedState<MyState>( sent_states.back().timestamp, new_num, current_state ) );
   add_sent_state( now, new_num, current_state );
-  send_in_fragments( "", new_num );
+  send_diff( "", new_num );
 
   next_ack_time = now + ACK_INTERVAL;
   next_send_time = uint64_t( -1 );
@@ -242,7 +241,7 @@ void TransportSender<MyState>::send_to_receiver( const std::string& diff )
     add_sent_state( timestamp(), new_num, current_state );
   }
 
-  send_in_fragments( diff, new_num ); // Can throw NetworkException
+  send_diff( diff, new_num ); // Can throw NetworkException
 
   /* successfully sent, probably */
   /* ("probably" because the FIRST size-exceeded datagram doesn't get an error) */
@@ -255,6 +254,7 @@ void TransportSender<MyState>::send_to_receiver( const std::string& diff )
 template<class MyState>
 void TransportSender<MyState>::update_assumed_receiver_state( void )
 {
+
   uint64_t now = timestamp();
 
   /* start from what is known and give benefit of the doubt to unacknowledged states
@@ -267,7 +267,7 @@ void TransportSender<MyState>::update_assumed_receiver_state( void )
   while ( i != sent_states.end() ) {
     assert( now >= i->timestamp );
 
-    if ( uint64_t( now - i->timestamp ) < connection->timeout() + ACK_DELAY ) {
+    if ( uint64_t( now - i->timestamp ) < connection->get_RTO() + ACK_DELAY ) {
       assumed_receiver_state = i;
     } else {
       return;
@@ -303,7 +303,7 @@ const std::string TransportSender<MyState>::make_chaff( void )
 }
 
 template<class MyState>
-void TransportSender<MyState>::send_in_fragments( const std::string& diff, uint64_t new_num )
+void TransportSender<MyState>::send_diff( const std::string& diff, uint64_t new_num )
 {
   Instruction inst;
 
@@ -319,28 +319,8 @@ void TransportSender<MyState>::send_in_fragments( const std::string& diff, uint6
     shutdown_tries++;
   }
 
-  std::vector<Fragment> fragments = fragmenter.make_fragments(
-    inst, connection->get_MTU() - Network::Connection::ADDED_BYTES - Crypto::Session::ADDED_BYTES );
-  for ( std::vector<Fragment>::iterator i = fragments.begin(); i != fragments.end(); i++ ) {
-    connection->send( i->tostring() );
-
-    if ( verbose ) {
-      fprintf(
-        stderr,
-        "[%u] Sent [%d=>%d] id %d, frag %d ack=%d, throwaway=%d, len=%d, frame rate=%.2f, timeout=%d, srtt=%.1f\n",
-        (unsigned int)( timestamp() % 100000 ),
-        (int)inst.old_num(),
-        (int)inst.new_num(),
-        (int)i->id,
-        (int)i->fragment_num,
-        (int)inst.ack_num(),
-        (int)inst.throwaway_num(),
-        (int)i->contents.size(),
-        1000.0 / (double)send_interval(),
-        (int)connection->timeout(),
-        connection->get_SRTT() );
-    }
-  }
+  last_ack_sent = inst.ack_num();
+  connection->send( inst );
 
   pending_data_ack = false;
 }

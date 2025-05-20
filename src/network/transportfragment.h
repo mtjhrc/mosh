@@ -95,7 +95,6 @@ public:
     last_instruction.set_new_num( -1 );
   }
   std::vector<Fragment> make_fragments( const Instruction& inst, size_t MTU );
-  uint64_t last_ack_sent( void ) const { return last_instruction.ack_num(); }
 };
 
 }

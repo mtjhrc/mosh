@@ -39,13 +39,19 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
+#include <stdexcept>
 #include <sys/socket.h>
 
 #include "src/crypto/crypto.h"
+#include "src/util/fatal_assert.h"
 
 using namespace Crypto;
 
@@ -73,173 +79,198 @@ public:
   ~NetworkException() throw() {}
 };
 
-enum Direction
+struct Port
+{
+  inline explicit constexpr Port( uint16_t p )
+    : p( p != 0 ? p : throw std::invalid_argument( "Invalid port number: 0" ) )
+  {}
+  uint16_t value() const { return p; }
+  operator uint16_t() const { return p; }
+
+private:
+  uint16_t p;
+};
+
+struct PortRange
+{
+  uint16_t low;
+  uint16_t high;
+};
+
+enum Direction : uint8_t
 {
   TO_SERVER = 0,
   TO_CLIENT = 1
 };
 
-class Packet
+uint64_t seq_from_nonce( const Nonce& nonce );
+Direction direction_from_nonce( const Nonce& nonce );
+Nonce make_nonce( Direction direction, uint64_t seq );
+
+class AddrInfo
 {
 public:
-  const uint64_t seq;
-  Direction direction;
-  uint16_t timestamp, timestamp_reply;
-  std::string payload;
+  struct addrinfo* res;
+  AddrInfo( const char* node, const char* service, const struct addrinfo* hints ) : res( NULL )
+  {
+    int errcode = getaddrinfo( node, service, hints, &res );
+    if ( errcode != 0 ) {
+      throw NetworkException( std::string( "Bad IP address (" ) + ( node != NULL ? node : "(null)" )
+                                + "): " + gai_strerror( errcode ),
+                              0 );
+    }
+  }
+  ~AddrInfo() { freeaddrinfo( res ); }
 
-  Packet( Direction s_direction, uint16_t s_timestamp, uint16_t s_timestamp_reply, const std::string& s_payload )
-    : seq( Crypto::unique() ), direction( s_direction ), timestamp( s_timestamp ),
-      timestamp_reply( s_timestamp_reply ), payload( s_payload )
-  {}
-
-  Packet( const Message& message );
-
-  Message toMessage( void );
-};
-
-union Addr {
-  struct sockaddr sa;
-  struct sockaddr_in sin;
-  struct sockaddr_in6 sin6;
-  struct sockaddr_storage ss;
-};
-
-class Connection
-{
 private:
-  /*
-   * For IPv4, guess the typical (minimum) header length;
-   * fragmentation is not dangerous, just inefficient.
-   */
-  static const int IPV4_HEADER_LEN = 20 /* base IP header */
-                                     + 8 /* UDP */;
-  /*
-   * For IPv6, we don't want to ever have MTU issues, so make a
-   * conservative guess about header size.
-   */
-  static const int IPV6_HEADER_LEN = 40   /* base IPv6 header */
-                                     + 16 /* 2 minimum-sized extension headers */
-                                     + 8 /* UDP */;
-  /* Application datagram MTU. For constructors and fallback. */
-  static const int DEFAULT_SEND_MTU = 500;
-  /*
-   * IPv4 MTU. Don't use full Ethernet-derived MTU,
-   * mobile networks have high tunneling overhead.
-   *
-   * As of July 2016, VPN traffic over Amtrak Acela wifi seems to be
-   * dropped if tunnelled packets are 1320 bytes or larger.  Use a
-   * 1280-byte IPv4 MTU for now.
-   *
-   * We may have to implement ICMP-less PMTUD (RFC 4821) eventually.
-   */
-  static const int DEFAULT_IPV4_MTU = 1280;
-  /* IPv6 MTU. Use the guaranteed minimum to avoid fragmentation. */
-  static const int DEFAULT_IPV6_MTU = 1280;
+  AddrInfo( const AddrInfo& );
+  AddrInfo& operator=( const AddrInfo& );
+};
 
-  static const uint64_t MIN_RTO = 50;   /* ms */
-  static const uint64_t MAX_RTO = 1000; /* ms */
+class Addr
+{
+  union {
+    struct sockaddr sa;
+    struct sockaddr_in sin;
+    struct sockaddr_in6 sin6;
+    struct sockaddr_storage ss;
+  } addr;
+  socklen_t _len;
 
-  static const int PORT_RANGE_LOW = 60001;
-  static const int PORT_RANGE_HIGH = 60999;
-
-  static const unsigned int SERVER_ASSOCIATION_TIMEOUT = 40000;
-  static const unsigned int PORT_HOP_INTERVAL = 10000;
-
-  static const unsigned int MAX_PORTS_OPEN = 10;
-  static const unsigned int MAX_OLD_SOCKET_AGE = 60000;
-
-  static const int CONGESTION_TIMESTAMP_PENALTY = 500; /* ms */
-
-  bool try_bind( const char* addr, int port_low, int port_high );
-
-  class Socket
+public:
+  Addr() : addr(), _len( 0 ) { std::memset( &addr, 0, sizeof addr ); }
+  Addr( const char* ip, std::optional<uint16_t> port, int sock_type, bool is_server ) : Addr()
   {
-  private:
-    int _fd;
-
-  public:
-    int fd( void ) const { return _fd; }
-    Socket( int family );
-    ~Socket();
-
-    Socket( const Socket& other );
-    Socket& operator=( const Socket& other );
-  };
-
-  std::deque<Socket> socks;
-  bool has_remote_addr;
-  Addr remote_addr;
-  socklen_t remote_addr_len;
-
-  bool server;
-
-  int MTU; /* application datagram MTU */
-
-  Base64Key key;
-  Session session;
-
-  void setup( void );
-
-  Direction direction;
-  uint16_t saved_timestamp;
-  uint64_t saved_timestamp_received_at;
-  uint64_t expected_receiver_seq;
-
-  uint64_t last_heard;
-  uint64_t last_port_choice;
-  uint64_t last_roundtrip_success; /* transport layer needs to tell us this */
-
-  bool RTT_hit;
-  double SRTT;
-  double RTTVAR;
-
-  /* Error from send()/sendto(). */
-  std::string send_error;
-
-  Packet new_packet( const std::string& s_payload );
-
-  void hop_port( void );
-
-  int sock( void ) const
-  {
-    assert( !socks.empty() );
-    return socks.back().fd();
+    set_from_addrinfo( ip, port, sock_type, is_server );
   }
 
-  void prune_sockets( void );
+  void set_from_addrinfo( const char* ip, std::optional<uint16_t> port, int sock_type, bool is_server )
+  {
+    struct addrinfo hints;
+    memset( &hints, 0, sizeof( hints ) );
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = sock_type;
+    hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV | ( is_server ? AI_PASSIVE : 0 );
+    char port_str[6];
+    if ( port.has_value() ) {
+      sprintf( port_str, "%u", port.value() );
+    }
 
-  std::string recv_one( int sock_to_recv );
+    AddrInfo ai( ip, port.has_value() ? port_str : nullptr, &hints );
 
-  void set_MTU( int family );
+    set_len( ai.res->ai_addrlen );
+    memcpy( &addr.sa, ai.res->ai_addr, len() );
+  }
+
+  sockaddr& sa() { return addr.sa; }
+  const sockaddr& sa() const { return addr.sa; }
+
+  sockaddr_in& sin() { return addr.sin; }
+  const sockaddr_in& sin() const { return addr.sin; }
+
+  sockaddr_in6& sin6() { return addr.sin6; }
+  const sockaddr_in6& sin6() const { return addr.sin6; }
+
+  constexpr socklen_t max_len() { return sizeof addr; }
+
+  socklen_t len() const { return _len; }
+
+  void set_len( socklen_t len )
+  {
+    fatal_assert( len <= max_len() );
+    _len = len;
+  }
+
+  static Addr getsockname( int fd )
+  {
+    Addr addr;
+    socklen_t len = addr.max_len();
+    if ( ::getsockname( fd, &addr.sa(), &len ) < 0 ) {
+      throw NetworkException( "getsockname", errno );
+    }
+    addr.set_len( len );
+    return addr;
+  }
+
+  Port port() const
+  {
+    switch ( sa().sa_family ) {
+      case AF_INET:
+        return Port( ntohs( sin().sin_port ) );
+      case AF_INET6:
+        return Port( ntohs( sin6().sin6_port ) );
+      default:
+        throw std::runtime_error( "Addr::port(): Unsupported address family: " + std::to_string( sa().sa_family ) );
+    }
+  }
+
+  void set_port( uint16_t port )
+  {
+    switch ( sa().sa_family ) {
+      case AF_INET:
+        sin().sin_port = ntohs( port );
+        break;
+      case AF_INET6:
+        sin6().sin6_port = ntohs( port );
+        break;
+      default:
+        throw std::runtime_error( "Addr::set_port(): Unsupported address family" );
+    }
+  }
+
+  std::string ip_address() const
+  {
+    char buffer[INET6_ADDRSTRLEN] = { 0 };
+
+    switch ( sa().sa_family ) {
+      case AF_INET:
+        if ( !inet_ntop( AF_INET, &sin().sin_addr, buffer, sizeof( buffer ) ) ) {
+          throw NetworkException( "inet_ntop failed for IPv4" );
+        }
+        break;
+      case AF_INET6:
+        if ( !inet_ntop( AF_INET6, &sin6().sin6_addr, buffer, sizeof( buffer ) ) ) {
+          throw NetworkException( "inet_ntop failed for IPv6" );
+        }
+        break;
+      default:
+        throw std::invalid_argument( "Unsupported address family" );
+    }
+
+    return std::string( buffer );
+  }
+};
+
+class Socket
+{
+private:
+  int _fd;
+  void close();
 
 public:
-  /* Network transport overhead. */
-  static const int ADDED_BYTES = 8 /* seqno/nonce */ + 4 /* timestamps */;
+  enum class FromFd : int
+  {
+  };
 
-  Connection( const char* desired_ip, const char* desired_port );      /* server */
-  Connection( const char* key_str, const char* ip, const char* port ); /* client */
+  int fd( void ) const { return _fd; }
+  Socket( int family, int type );
+  Socket( FromFd fd );
+  ~Socket();
 
-  void send( const std::string& s );
-  std::string recv( void );
-  const std::vector<int> fds( void ) const;
-  int get_MTU( void ) const { return MTU; }
+  Socket( const Socket& other );
+  Socket& operator=( const Socket& other );
 
-  std::string port( void ) const;
-  std::string get_key( void ) const { return key.printable_key(); }
-  bool get_has_remote_addr( void ) const { return has_remote_addr; }
-
-  uint64_t timeout( void ) const;
-  double get_SRTT( void ) const { return SRTT; }
-
-  const Addr& get_remote_addr( void ) const { return remote_addr; }
-  socklen_t get_remote_addr_len( void ) const { return remote_addr_len; }
-
-  std::string& get_send_error( void ) { return send_error; }
-
-  void set_last_roundtrip_success( uint64_t s_success ) { last_roundtrip_success = s_success; }
-
-  static bool parse_portrange( const char* desired_port_range, int& desired_port_low, int& desired_port_high );
+  Socket( Socket&& other );
+  Socket& operator=( Socket&& other );
 };
+
+enum class NetworkTransportMode
+{
+  UDP_ONLY,
+  TCP_ONLY,
+  PREFER_UDP,
+};
+
 }
 
 #endif

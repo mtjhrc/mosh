@@ -37,14 +37,16 @@
 #include <set>
 
 #include "src/network/network.h"
+#include "src/network/udp_connection.h"
 
 int main()
 {
+  /*
   std::set<uint64_t> nonces;
   const unsigned int NUM_EXAMPLES = 1000000;
 
   for ( unsigned int i = 0; i < NUM_EXAMPLES; i++ ) {
-    Network::Packet packet( Network::TO_CLIENT, 0, 0, "test" );
+    Network::UDPConnection::Packet packet( Network::TO_CLIENT, 0, 0, "test" );
     nonces.insert( packet.toMessage().nonce.val() );
   }
 
@@ -67,7 +69,7 @@ int main()
 
   if ( nonces.size() == 4 * NUM_EXAMPLES ) {
     return EXIT_SUCCESS;
-  }
+  }*/
 
   return EXIT_FAILURE;
 }

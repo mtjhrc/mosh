@@ -61,8 +61,8 @@ base64_CPPFLAGS = $(ocb_aes_CPPFLAGS)
 base64_LDADD = $(ocb_aes_LDADD)
 
 nonce_incr_SOURCES = nonce-incr.cc
-nonce_incr_CPPFLAGS = -I$(srcdir)/../network -I$(srcdir)/../crypto -I$(srcdir)/../util $(CRYPTO_CFLAGS)
-nonce_incr_LDADD = ../network/libmoshnetwork.a ../crypto/libmoshcrypto.a ../util/libmoshutil.a $(CRYPTO_LIBS)
+nonce_incr_CPPFLAGS = -I$(srcdir)/../network -I$(srcdir)/../crypto -I$(srcdir)/../util -I$(srcdir)/../protobufs $(CRYPTO_CFLAGS) $(protobuf_LIBS)
+nonce_incr_LDADD = ../network/libmoshnetwork.a ../crypto/libmoshcrypto.a ../util/libmoshutil.a ../protobufs/libmoshprotos.a $(CRYPTO_LIBS) $(protobuf_LIBS)
 
 inpty_SOURCES = inpty.cc
 inpty_CPPFLAGS = -I$(srcdir)/../util

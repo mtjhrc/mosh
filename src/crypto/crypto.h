@@ -58,10 +58,15 @@ public:
 
 /*
  * OCB (and other algorithms) require a source of nonce/sequence
- * numbers that never repeats its output.  Enforce that with this
- * function.
+ * numbers that never repeats its output. We provide that here.
  */
-uint64_t unique( void );
+class Counter
+{
+  uint64_t counter = 0;
+
+public:
+  uint64_t next( void );
+};
 
 /* 16-byte-aligned buffer, with length. */
 class AlignedBuffer
@@ -121,10 +126,6 @@ public:
   const Nonce nonce;
   const std::string text;
 
-  Message( const char* nonce_bytes, size_t nonce_len, const char* text_bytes, size_t text_len )
-    : nonce( nonce_bytes, nonce_len ), text( text_bytes, text_len )
-  {}
-
   Message( const Nonce& s_nonce, const std::string& s_text ) : nonce( s_nonce ), text( s_text ) {}
 };
 
@@ -141,7 +142,7 @@ private:
   AlignedBuffer nonce_buffer;
 
 public:
-  static const int RECEIVE_MTU = 2048;
+  static const int RECEIVE_MTU = 2048 * 2048;
   /* Overhead (not counting the nonce, which is handled by network transport) */
   static const int ADDED_BYTES = 16 /* final OCB block */;
 

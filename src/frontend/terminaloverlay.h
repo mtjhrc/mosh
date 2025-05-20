@@ -212,8 +212,8 @@ public:
 class PredictionEngine
 {
 private:
-  static const uint64_t SRTT_TRIGGER_LOW = 20;  /* <= ms cures SRTT trigger to show predictions */
-  static const uint64_t SRTT_TRIGGER_HIGH = 30; /* > ms starts SRTT trigger */
+  static const uint64_t SRTT_TRIGGER_LOW = 20;  /* <= ms cures srtt trigger to show predictions */
+  static const uint64_t SRTT_TRIGGER_HIGH = 30; /* > ms starts srtt trigger */
 
   static const uint64_t FLAG_TRIGGER_LOW = 50;  /* <= ms cures flagging */
   static const uint64_t FLAG_TRIGGER_HIGH = 80; /* > ms starts flagging */
